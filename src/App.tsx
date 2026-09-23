@@ -1,6 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { RenewalPortal } from "./components/RenewalPortal";
 import { AdminPortal } from "./components/AdminPortal";
+import { TenantWebsiteView } from "./components/TenantWebsiteView";
 import {
   Globe,
   Shield,
@@ -12,9 +13,74 @@ import {
   ExternalLink,
 } from "lucide-react";
 
+const RESERVED_SLUGS = [
+  "admin",
+  "portal",
+  "api",
+  "assets",
+  "src",
+  "public",
+  "favicon.ico",
+  "robots.txt",
+  "index.html",
+];
+
+function getInitialRoute(): { view: "portal" | "admin" | "tenant"; tenantSlug?: string } {
+  if (typeof window === "undefined") return { view: "portal" };
+
+  // 1. Check Subdomain in Hostname (e.g. royalsweets.web.digimoms.in or royalsweets.localhost)
+  const host = window.location.hostname.toLowerCase();
+  const hostParts = host.split(".");
+  if (hostParts.length >= 3) {
+    const sub = hostParts[0];
+    if (sub !== "web" && sub !== "www" && !RESERVED_SLUGS.includes(sub)) {
+      return { view: "tenant", tenantSlug: sub };
+    }
+  }
+
+  // 2. Check Pathname (e.g. /royalsweets or /admin or /portal)
+  const path = window.location.pathname;
+  if (path === "/admin" || path.startsWith("/admin/")) {
+    return { view: "admin" };
+  }
+  if (path === "/portal" || path.startsWith("/portal/")) {
+    return { view: "portal" };
+  }
+
+  const match = path.match(/^\/([a-zA-Z0-9_-]+)(\/.*)?$/);
+  if (match && match[1]) {
+    const slug = match[1].toLowerCase();
+    if (!RESERVED_SLUGS.includes(slug)) {
+      return { view: "tenant", tenantSlug: slug };
+    }
+  }
+
+  return { view: "portal" };
+}
+
 export default function App() {
-  const [currentView, setCurrentView] = useState<"portal" | "admin">("portal");
+  const [routeInfo, setRouteInfo] = useState<{ view: "portal" | "admin" | "tenant"; tenantSlug?: string }>(getInitialRoute);
   const [showDeploymentManual, setShowDeploymentManual] = useState<boolean>(false);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setRouteInfo(getInitialRoute());
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const navigateTo = (view: "portal" | "admin") => {
+    setRouteInfo({ view });
+    window.history.pushState(null, "", view === "admin" ? "/admin" : "/portal");
+  };
+
+  // If viewing a tenant client's website (e.g. web.digimoms.in/royalsweets)
+  if (routeInfo.view === "tenant" && routeInfo.tenantSlug) {
+    return <TenantWebsiteView subdomain={routeInfo.tenantSlug} />;
+  }
+
+  const currentView = routeInfo.view === "admin" ? "admin" : "portal";
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans selection:bg-blue-600 selection:text-white">
@@ -45,7 +111,7 @@ export default function App() {
           <div className="flex items-center gap-2">
             <nav className="flex bg-neutral-950 p-1 rounded-xl border border-neutral-800 text-xs font-semibold">
               <button
-                onClick={() => setCurrentView("portal")}
+                onClick={() => navigateTo("portal")}
                 className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
                   currentView === "portal"
                     ? "bg-blue-600 text-white shadow-sm"
@@ -55,7 +121,7 @@ export default function App() {
                 <CreditCard className="w-3.5 h-3.5" /> Public Renewal Portal
               </button>
               <button
-                onClick={() => setCurrentView("admin")}
+                onClick={() => navigateTo("admin")}
                 className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
                   currentView === "admin"
                     ? "bg-blue-600 text-white shadow-sm"
@@ -80,7 +146,7 @@ export default function App() {
       {/* Main App Content Body */}
       <main className="px-4 lg:px-8 py-8">
         {currentView === "portal" ? (
-          <RenewalPortal onOpenAdmin={() => setCurrentView("admin")} />
+          <RenewalPortal onOpenAdmin={() => navigateTo("admin")} />
         ) : (
           <AdminPortal />
         )}
