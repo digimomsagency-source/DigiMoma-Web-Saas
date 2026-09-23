@@ -1521,13 +1521,10 @@ app.get("/api/tenant/render/:subdomain", (req: Request, res: Response) => {
   return res.send(renderUnderConstructionHtml(business));
 });
 
-// Middleware: Route requests to web.digimoms.in/{slug} and web.digimoms.in/{slug}/*
+// Middleware: Route requests to web.digimoms.in/{slug} OR {slug}.web.digimoms.in
 app.use((req: Request, res: Response, next: NextFunction) => {
-  const match = req.path.match(/^\/([a-zA-Z0-9_-]+)(\/.*)?$/);
-  if (!match) return next();
-
-  const slug = match[1];
-  const subpath = match[2] ? match[2].replace(/^\/+/, "") : "";
+  let slug = "";
+  let subpath = "";
 
   // Reserved paths for application infrastructure & SPA
   const reserved = [
@@ -1543,10 +1540,30 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     "node_modules",
     "favicon.ico",
     "robots.txt",
+    "index.html",
   ];
-  if (reserved.includes(slug.toLowerCase())) {
-    return next();
+
+  // 1. Check Path-based: e.g. web.digimoms.in/{slug}
+  const match = req.path.match(/^\/([a-zA-Z0-9_-]+)(\/.*)?$/);
+  const possibleSlug = match ? match[1] : "";
+
+  if (possibleSlug && !reserved.includes(possibleSlug.toLowerCase())) {
+    slug = possibleSlug;
+    subpath = match && match[2] ? match[2].replace(/^\/+/, "") : "";
+  } else {
+    // 2. Check Hostname-based: e.g. {slug}.web.digimoms.in or {slug}.digimoms.in
+    const host = (req.headers.host || req.hostname || "").split(":")[0].toLowerCase();
+    const parts = host.split(".");
+    if (parts.length >= 3) {
+      const firstPart = parts[0];
+      if (firstPart !== "web" && firstPart !== "www" && !reserved.includes(firstPart)) {
+        slug = firstPart;
+        subpath = req.path.replace(/^\/+/, "");
+      }
+    }
   }
+
+  if (!slug) return next();
 
   // Look up business by slug / subdomain
   const business = businessesStore.find((b) => b.subdomain.toLowerCase() === slug.toLowerCase());
