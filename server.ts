@@ -1,7 +1,9 @@
-import express, { Request, Response, NextFunction } from "express";
+import express from "express";
+import type { Request, Response, NextFunction } from "express";
 import path from "path";
 import crypto from "crypto";
-import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Business, Transaction, Coupon, AppSettings, TenantFile, DatabaseSizeInfo } from "./src/types.js";
 
 const app = express();
@@ -1628,20 +1630,23 @@ async function startServer() {
 export default app;
 export { app };
 
-// Determine if we are running in a serverless environment (Vercel, AWS Lambda, Cloud Run, etc.)
+// Determine if this file was executed directly as the CLI entrypoint (e.g. `npm run dev` / `tsx server.ts`)
+// When imported as a module (e.g. by Vercel's `api/index.ts`), NEVER start the HTTP listener or Vite server.
+const isMainScript = Boolean(
+  process.argv[1] &&
+  (process.argv[1].endsWith("server.ts") || process.argv[1].endsWith("server.cjs") || process.argv[1].endsWith("server.js"))
+);
+
 const isServerless = Boolean(
   process.env.VERCEL ||
   process.env.VERCEL_ENV ||
-  process.env.NOW_REGION ||
   process.env.AWS_LAMBDA_FUNCTION_NAME ||
   process.env.AWS_EXECUTION_ENV ||
   process.env.LAMBDA_TASK_ROOT ||
-  process.env._HANDLER ||
-  process.env.NODE_ENV === "production"
+  process.env._HANDLER
 );
 
-// Only start standalone HTTP server in local development or explicit standalone execution
-if (!isServerless || process.env.STANDALONE === "true") {
+if (isMainScript && !isServerless) {
   startServer();
 }
 
