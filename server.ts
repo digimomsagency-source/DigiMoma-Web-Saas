@@ -22,27 +22,15 @@ app.use((req, res, next) => {
 // If Vercel rewrote the incoming path to /api, or stripped /api to /admin/login,
 // restore the correct /api/... path so all Express routes match seamlessly.
 app.use((req, res, next) => {
-  const original = req.originalUrl || (req.headers["x-matched-path"] as string) || req.url || "";
-  if (original && original.startsWith("/api") && (!req.url.startsWith("/api") || req.url === "/api" || req.url === "/api/")) {
+  const original = (req.headers["x-matched-path"] as string) || (req.headers["x-invoke-path"] as string) || req.originalUrl || req.url || "";
+  if (original && original !== "/api" && original !== "/api/" && (req.url === "/api" || req.url === "/api/" || req.url === "/")) {
     req.url = original;
   }
-  const currentUrl = req.url || "";
-  if (currentUrl && !currentUrl.startsWith("/api") && !currentUrl.startsWith("/portal") && !currentUrl.startsWith("/assets")) {
-    const apiPrefixes = [
-      "/admin",
-      "/businesses",
-      "/business",
-      "/settings",
-      "/coupons",
-      "/transactions",
-      "/payu",
-      "/stats",
-      "/db-size",
-      "/tenant",
-      "/health"
-    ];
-    if (apiPrefixes.some((prefix) => currentUrl.startsWith(prefix))) {
-      req.url = "/api" + currentUrl;
+  if (!req.url.startsWith("/api")) {
+    const rawUrl = req.url;
+    const isApi = /^\/(admin|businesses|business|settings|coupons|transactions|payu|stats|db-size|tenant|health)(\/|\?|$)/.test(rawUrl);
+    if (isApi) {
+      req.url = "/api" + rawUrl;
     }
   }
   next();
@@ -1603,7 +1591,18 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   return res.status(404).send(`404: Asset '${subpath}' not found in ${business.name} storage`);
 });
 
-// Vite integration / Static Serving
+// Global Express error handler to prevent unhandled exceptions from crashing serverless runtime
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("[DigiMoms Backend Error]:", err);
+  if (!res.headersSent) {
+    res.status(500).json({
+      error: "Internal server error occurred",
+      message: err?.message || "An unexpected error occurred in backend service",
+    });
+  }
+});
+
+// Vite integration / Static Serving (Local development or standalone container only)
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
@@ -1629,15 +1628,21 @@ async function startServer() {
 export default app;
 export { app };
 
+// Determine if we are running in a serverless environment (Vercel, AWS Lambda, Cloud Run, etc.)
 const isServerless = Boolean(
-  process.env.VERCEL === "1" ||
+  process.env.VERCEL ||
   process.env.VERCEL_ENV ||
   process.env.NOW_REGION ||
   process.env.AWS_LAMBDA_FUNCTION_NAME ||
-  process.env.LAMBDA_TASK_ROOT
+  process.env.AWS_EXECUTION_ENV ||
+  process.env.LAMBDA_TASK_ROOT ||
+  process.env._HANDLER ||
+  process.env.NODE_ENV === "production"
 );
 
-if (!isServerless) {
+// Only start standalone HTTP server in local development or explicit standalone execution
+if (!isServerless || process.env.STANDALONE === "true") {
   startServer();
 }
+
 
