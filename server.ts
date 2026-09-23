@@ -4,7 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Business, Transaction, Coupon, AppSettings, TenantFile, DatabaseSizeInfo } from "./src/types.js";
+import type { Business, Transaction, Coupon, AppSettings, TenantFile, DatabaseSizeInfo } from "./src/types";
 
 const app = express();
 const PORT = 3000;

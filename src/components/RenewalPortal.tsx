@@ -24,7 +24,7 @@ interface RenewalPortalProps {
 }
 
 export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onOpenAdmin }) => {
-  const [mobileInput, setMobileInput] = useState<string>(initialMobile || "9123456789");
+  const [mobileInput, setMobileInput] = useState<string>(initialMobile || "");
   const [loading, setLoading] = useState<boolean>(false);
   const [business, setBusiness] = useState<(Business & { days_remaining: number; is_expired: boolean }) | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
@@ -48,16 +48,6 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
 
   // Checkout & PayU Processing state
   const [checkoutLoading, setCheckoutLoading] = useState<boolean>(false);
-  const [paymentStep, setPaymentStep] = useState<"select" | "payu_review" | "success">("select");
-  const [initiatedTx, setInitiatedTx] = useState<{
-    txnid: string;
-    amount: number;
-    original_amount: number;
-    discount_amount: number;
-    payu_params: Record<string, string>;
-    action_url: string;
-  } | null>(null);
-  const [webhookSimulating, setWebhookSimulating] = useState<boolean>(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   // Tenant Preview Drawer/Modal
@@ -76,7 +66,31 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
 
   useEffect(() => {
     fetchSettings();
-    if (initialMobile) {
+
+    // Check URL parameters for PayU callback redirects
+    const urlParams = new URLSearchParams(window.location.search);
+    const paymentStatus = urlParams.get("payment");
+    const txnid = urlParams.get("txnid");
+    const mobile = urlParams.get("mobile");
+    const error = urlParams.get("error");
+
+    if (paymentStatus === "success" && txnid) {
+      setSuccessMessage(
+        `PayU payment verified successfully! Transaction ID: ${txnid}. Your subscription plan has been extended and status is now Active.`
+      );
+      if (mobile) {
+        setMobileInput(mobile);
+        handleLookup(mobile);
+      }
+    } else if (paymentStatus === "failed") {
+      setLookupError(
+        `Payment was not completed or failed on PayU: ${error || "Transaction Cancelled"}. Your subscription was not renewed.`
+      );
+      if (mobile) {
+        setMobileInput(mobile);
+        handleLookup(mobile);
+      }
+    } else if (initialMobile) {
       handleLookup(initialMobile);
     }
   }, [initialMobile]);
@@ -93,8 +107,6 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
       setLoading(true);
       setLookupError(null);
       setBusiness(null);
-      setSuccessMessage(null);
-      setPaymentStep("select");
 
       const res = await fetch(`/api/business/lookup?mobile=${encodeURIComponent(query.trim())}`);
       const json = await res.json();
@@ -161,7 +173,7 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
     setCouponCode("");
   };
 
-  // Initiate PayU Checkout
+  // Initiate PayU Checkout - DIRECT REAL SUBMISSION to PayU Gateway
   const handleInitiatePayU = async () => {
     if (!business) return;
     try {
@@ -176,39 +188,31 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
         }),
       });
       const json = await res.json();
-      if (json.success) {
-        setInitiatedTx(json);
-        setPaymentStep("payu_review");
+      if (json.success && json.action_url && json.payu_params) {
+        // Dynamically create and submit POST form directly to PayU Hosted Checkout!
+        const form = document.createElement("form");
+        form.method = "POST";
+        form.action = json.action_url;
+        form.style.display = "none";
+
+        Object.entries(json.payu_params).forEach(([key, val]) => {
+          const input = document.createElement("input");
+          input.type = "hidden";
+          input.name = key;
+          input.value = String(val);
+          form.appendChild(input);
+        });
+
+        document.body.appendChild(form);
+        form.submit();
+      } else {
+        alert(json.error || "Unable to initiate payment with PayU. Please check merchant key and salt in Admin settings.");
       }
     } catch (err) {
       console.error("PayU initialization error", err);
+      alert("Failed to connect to payment server. Please check your network connection.");
     } finally {
       setCheckoutLoading(false);
-    }
-  };
-
-  // Automated PayU Webhook Simulator (triggers server-to-server callback, verifies reverse hash, and auto-renews!)
-  const handleTriggerWebhookSimulation = async () => {
-    if (!initiatedTx) return;
-    try {
-      setWebhookSimulating(true);
-      const res = await fetch("/api/payu/simulate-webhook", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ txnid: initiatedTx.txnid }),
-      });
-      const json = await res.json();
-
-      if (json.success) {
-        setPaymentStep("success");
-        setSuccessMessage(json.message);
-        // Refresh business data to show active status and incremented plan_end_date!
-        await handleLookup(business?.mobile);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setWebhookSimulating(false);
     }
   };
 
@@ -252,7 +256,7 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
                 id="mobile-input-verify"
                 value={mobileInput}
                 onChange={(e) => setMobileInput(e.target.value)}
-                placeholder="Enter 10-Digit Registered Mobile (e.g. 9123456789)"
+                placeholder="Enter 10-Digit Registered Mobile (e.g. 9876543210)"
                 className="w-full pl-11 pr-4 py-3 bg-neutral-950 border border-neutral-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 rounded-xl text-neutral-100 placeholder-neutral-500 text-sm font-mono outline-none transition"
               />
             </div>
@@ -272,41 +276,6 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
               )}
             </button>
           </form>
-
-          {/* Quick Demo Mobile Selectors */}
-          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-neutral-400">
-            <span>Quick test profiles:</span>
-            <button
-              type="button"
-              onClick={() => {
-                setMobileInput("9123456789");
-                handleLookup("9123456789");
-              }}
-              className="px-2.5 py-1 bg-red-950/60 hover:bg-red-900/80 border border-red-800/80 text-red-300 rounded-lg transition font-mono"
-            >
-              9123456789 (Expired / Inactive)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setMobileInput("9876543210");
-                handleLookup("9876543210");
-              }}
-              className="px-2.5 py-1 bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-800/80 text-emerald-300 rounded-lg transition font-mono"
-            >
-              9876543210 (Active Store)
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setMobileInput("9475388085");
-                handleLookup("9475388085");
-              }}
-              className="px-2.5 py-1 bg-blue-950/60 hover:bg-blue-900/80 border border-blue-800/80 text-blue-300 rounded-lg transition font-mono"
-            >
-              9475388085 (Royal Sweets)
-            </button>
-          </div>
         </div>
       </div>
 
@@ -381,7 +350,6 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
                 id="renew-now-btn"
                 onClick={() => {
                   setIsRenewModalOpen(true);
-                  setPaymentStep("select");
                 }}
                 className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold rounded-xl text-sm flex items-center gap-2 transition shadow-md shadow-blue-900/30"
               >
@@ -509,11 +477,10 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
               </button>
             </div>
 
-            {/* Step 1: Package Selection Matrix & Coupon */}
-            {paymentStep === "select" && (
-              <div className="mt-6 space-y-6">
-                <div>
-                  <label className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
+            {/* Package Selection Matrix & Coupon */}
+            <div className="mt-6 space-y-6">
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
                     Select Renewal Tier
                   </label>
 
@@ -657,12 +624,12 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
                   </div>
                 </div>
 
-                {/* Proceed to Checkout Button */}
-                <div className="flex items-center justify-end gap-3 pt-2">
+                {/* Proceed to Pay with PayU Button (Single Direct Action) */}
+                <div className="flex items-center justify-end gap-3 pt-4 border-t border-neutral-800">
                   <button
                     type="button"
                     onClick={() => setIsRenewModalOpen(false)}
-                    className="px-4 py-2.5 rounded-xl text-neutral-400 hover:text-white text-sm"
+                    className="px-5 py-2.5 rounded-xl text-neutral-400 hover:text-white text-sm transition"
                   >
                     Cancel
                   </button>
@@ -670,138 +637,23 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
                     type="button"
                     onClick={handleInitiatePayU}
                     disabled={checkoutLoading}
-                    className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 disabled:opacity-50 text-white font-semibold rounded-xl text-sm flex items-center gap-2 shadow-sm transition"
+                    className="px-7 py-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl text-sm flex items-center gap-2 shadow-lg shadow-emerald-950/50 transition cursor-pointer"
                   >
                     {checkoutLoading ? (
                       <>
-                        <Loader2 className="w-4 h-4 animate-spin" /> Preparing Checkout...
+                        <Loader2 className="w-4 h-4 animate-spin" /> Redirecting to PayU...
                       </>
                     ) : (
                       <>
-                        Proceed to PayU Checkout <ArrowRight className="w-4 h-4" />
+                        <CreditCard className="w-4 h-4" /> Pay &#8377;{currentFinalPrice.toFixed(2)} with PayU <ArrowRight className="w-4 h-4" />
                       </>
                     )}
                   </button>
                 </div>
               </div>
-            )}
-
-            {/* Step 2: PayU Review & Server-to-Server Webhook Verification Screen */}
-            {paymentStep === "payu_review" && initiatedTx && (
-              <div className="mt-6 space-y-5">
-                <div className="p-4 bg-blue-950/40 border border-blue-800 rounded-xl text-xs text-blue-200 space-y-1">
-                  <div className="font-bold text-sm text-blue-100 flex items-center gap-1.5">
-                    <ShieldCheck className="w-4 h-4 text-blue-400" /> Active Checkout Logged in Pending State
-                  </div>
-                  <p>
-                    Transaction tracking code: <span className="font-mono font-bold text-white">{initiatedTx.txnid}</span>
-                  </p>
-                  <p>
-                    PayU Merchant Key &amp; Salt hash generated server-side. Once payment callback occurs, our standalone webhook endpoint (<code className="text-blue-300 font-mono">POST /api/payu-webhook</code>) intercepts the payload, verifies reverse hash integrity, increments store validity, and immediately flips status to Active.
-                  </p>
-                </div>
-
-                {/* Transaction Parameters Breakdown */}
-                <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4 font-mono text-xs space-y-1.5 text-neutral-300">
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Gateway Target:</span>
-                    <span className="text-neutral-200">{initiatedTx.action_url}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Amount:</span>
-                    <span className="text-emerald-400 font-bold">&#8377;{initiatedTx.amount}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">PayU SHA-512 Hash:</span>
-                    <span className="text-neutral-400 truncate max-w-[280px]" title={initiatedTx.payu_params.hash}>
-                      {initiatedTx.payu_params.hash}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Return Webhook:</span>
-                    <span className="text-blue-400">https://web.digimoms.in/api/payu-webhook</span>
-                  </div>
-                </div>
-
-                {/* Interactive Action Choices */}
-                <div className="space-y-3 pt-2">
-                  {/* Option A: One-Click Webhook Verification & Instant Auto-Renewal Simulator */}
-                  <div className="p-4 bg-emerald-950/50 border border-emerald-700/80 rounded-xl">
-                    <div className="font-semibold text-sm text-emerald-200 flex items-center gap-1.5">
-                      <Sparkles className="w-4 h-4 text-emerald-400" /> Instant Webhook Automated Verification Simulator
-                    </div>
-                    <p className="text-xs text-emerald-300 mt-1">
-                      Instantly simulate the PayU server-to-server webhook callback. This verifies the reverse hash, marks the transaction Success, extends the validity end date by {selectedTier === "monthly" ? "1 month" : selectedTier === "six_month" ? "6 months" : "1 year"}, and activates the website instantly!
-                    </p>
-                    <button
-                      type="button"
-                      onClick={handleTriggerWebhookSimulation}
-                      disabled={webhookSimulating}
-                      className="mt-3 w-full py-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold rounded-xl text-sm transition flex items-center justify-center gap-2 shadow-sm"
-                    >
-                      {webhookSimulating ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" /> Verifying PayU Webhook Callback...
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="w-4 h-4" /> Simulate Verified PayU Webhook &amp; Auto-Activate
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {/* Option B: Standard Gateway Form Submission */}
-                  <form action={initiatedTx.action_url} method="POST" target="_blank" className="pt-2">
-                    {Object.entries(initiatedTx.payu_params).map(([key, val]) => (
-                      <input key={key} type="hidden" name={key} value={val} />
-                    ))}
-                    <button
-                      type="submit"
-                      className="w-full py-2.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-1.5"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" /> Submit to Live PayU Gateway Hosted Page ({settings?.payu_env === "prod" ? "Production" : "Sandbox Test Mode"})
-                    </button>
-                  </form>
-                </div>
-              </div>
-            )}
-
-            {/* Step 3: Success Screen */}
-            {paymentStep === "success" && (
-              <div className="mt-6 text-center space-y-4 py-4">
-                <div className="w-16 h-16 bg-emerald-600 text-white rounded-full flex items-center justify-center mx-auto shadow-lg shadow-emerald-900/40">
-                  <Check className="w-8 h-8 stroke-[3]" />
-                </div>
-                <h4 className="text-xl font-bold text-white">Subscription Successfully Renewed!</h4>
-                <p className="text-sm text-neutral-300 max-w-md mx-auto">
-                  {successMessage || "Store has been restored to Active status with automated timestamp extension."}
-                </p>
-                <div className="pt-4 flex justify-center gap-3">
-                  <button
-                    onClick={() => {
-                      setIsRenewModalOpen(false);
-                      setPaymentStep("select");
-                    }}
-                    className="px-6 py-2.5 bg-neutral-800 hover:bg-neutral-700 text-white font-medium rounded-xl text-sm transition"
-                  >
-                    Close
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsRenewModalOpen(false);
-                      setPreviewSubdomain(business.subdomain);
-                    }}
-                    className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-xl text-sm transition flex items-center gap-2"
-                  >
-                    <Eye className="w-4 h-4" /> View Live Tenant Store
-                  </button>
-                </div>
-              </div>
-            )}
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
       {/* TENANT SUBDOMAIN LIVE PREVIEW MODAL */}
       {previewSubdomain && (

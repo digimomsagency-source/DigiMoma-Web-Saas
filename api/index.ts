@@ -1,4 +1,4 @@
-import app from "../server.ts";
+import app from "../server";
 
 export default function handler(req: any, res: any) {
   // Restore original requested URL when Vercel rewrites /api/(.*) to /api
