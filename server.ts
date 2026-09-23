@@ -1604,50 +1604,9 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   }
 });
 
-// Vite integration / Static Serving (Local development or standalone container only)
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (_req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`[DigiMoms SaaS] Server running on http://0.0.0.0:${PORT} (Domain: web.digimoms.in)`);
-  });
-}
-
-// Export for Vercel serverless deployment
+// Export app instance for local server and Vercel serverless deployment
 export default app;
 export { app };
 
-// Determine if this file was executed directly as the CLI entrypoint (e.g. `npm run dev` / `tsx server.ts`)
-// When imported as a module (e.g. by Vercel's `api/index.ts`), NEVER start the HTTP listener or Vite server.
-const isMainScript = Boolean(
-  process.argv[1] &&
-  (process.argv[1].endsWith("server.ts") || process.argv[1].endsWith("server.cjs") || process.argv[1].endsWith("server.js"))
-);
-
-const isServerless = Boolean(
-  process.env.VERCEL ||
-  process.env.VERCEL_ENV ||
-  process.env.AWS_LAMBDA_FUNCTION_NAME ||
-  process.env.AWS_EXECUTION_ENV ||
-  process.env.LAMBDA_TASK_ROOT ||
-  process.env._HANDLER
-);
-
-if (isMainScript && !isServerless) {
-  startServer();
-}
 
 
