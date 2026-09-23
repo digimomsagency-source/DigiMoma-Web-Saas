@@ -1,0 +1,6 @@
+{
+  "name": "DigiMoms SaaS Renewal & Admin Platform",
+  "description": "Multi-tenant SaaS renewal portal, real-time Supabase storage monitor, automated PayU billing, and virtual CMS file manager for web.digimoms.in.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
