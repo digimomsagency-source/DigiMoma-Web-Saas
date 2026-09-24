@@ -13,9 +13,18 @@ const PORT = 3000;
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Admin-Password");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Admin-Password, X-Admin-Key");
   if (req.method === "OPTIONS") {
     return res.status(200).end();
+  }
+  next();
+});
+
+// Pre-mark req._body if req.body was pre-parsed by Vercel serverless runtime
+// This prevents Express's body-parser from hanging indefinitely on consumed streams
+app.use((req, _res, next) => {
+  if (req.body !== undefined && req.body !== null) {
+    (req as any)._body = true;
   }
   next();
 });
@@ -42,9 +51,14 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
-// Health check endpoint for uptime & Vercel verification
-app.get("/api/health", (_req, res) => {
-  res.json({ status: "ok", service: "digimoms-backend", timestamp: new Date().toISOString() });
+// Health & Root API check endpoints for uptime & Vercel verification
+app.get(["/api", "/api/", "/api/health"], (_req, res) => {
+  res.json({
+    status: "ok",
+    service: "digimoms-backend",
+    version: "2.0.0",
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // In-memory data store with realistic seed data
@@ -756,7 +770,10 @@ function checkAdminAuth(req: Request, res: Response, next: () => void) {
 
 // Admin login
 app.post("/api/admin/login", (req: Request, res: Response) => {
-  const { password } = req.body;
+  const password = req.body?.password;
+  if (!password) {
+    return res.status(400).json({ error: "Password is required" });
+  }
   if (
     password === settingsStore.admin_password ||
     password === "Swastika4945@" ||
@@ -1553,12 +1570,23 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   } else {
     // 2. Check Hostname-based: e.g. {slug}.web.digimoms.in or {slug}.digimoms.in
     const host = (req.headers.host || req.hostname || "").split(":")[0].toLowerCase();
-    const parts = host.split(".");
-    if (parts.length >= 3) {
-      const firstPart = parts[0];
-      if (firstPart !== "web" && firstPart !== "www" && !reserved.includes(firstPart)) {
-        slug = firstPart;
-        subpath = req.path.replace(/^\/+/, "");
+    const isCloudHost =
+      host.endsWith(".run.app") ||
+      host.endsWith(".vercel.app") ||
+      host.endsWith(".appspot.com") ||
+      host.endsWith(".web.app") ||
+      host.endsWith(".firebaseapp.com") ||
+      host.endsWith(".onrender.com") ||
+      host.endsWith(".github.io");
+
+    if (!isCloudHost) {
+      const parts = host.split(".");
+      if (parts.length >= 3) {
+        const firstPart = parts[0];
+        if (firstPart !== "web" && firstPart !== "www" && !reserved.includes(firstPart)) {
+          slug = firstPart;
+          subpath = req.path.replace(/^\/+/, "");
+        }
       }
     }
   }
@@ -1608,6 +1636,17 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   }
 
   return res.status(404).send(`404: Asset '${subpath}' not found in ${business.name} storage`);
+});
+
+// Safe 404 handler for API routes to prevent Express default finalhandler unpipe() crash on Vercel
+app.use("/api", (req: Request, res: Response) => {
+  if (!res.headersSent) {
+    res.status(404).json({
+      error: "API endpoint not found",
+      method: req.method,
+      path: req.originalUrl || req.url,
+    });
+  }
 });
 
 // Global Express error handler to prevent unhandled exceptions from crashing serverless runtime

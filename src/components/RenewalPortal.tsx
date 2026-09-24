@@ -109,15 +109,20 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
       setBusiness(null);
 
       const res = await fetch(`/api/business/lookup?mobile=${encodeURIComponent(query.trim())}`);
-      const json = await res.json();
-
-      if (!res.ok) {
-        setLookupError(json.error || "No registered business found for this mobile number.");
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        const json = await res.json();
+        if (!res.ok) {
+          setLookupError(json.error || "No registered business found for this mobile number.");
+        } else {
+          setBusiness(json.business);
+        }
       } else {
-        setBusiness(json.business);
+        const text = await res.text();
+        setLookupError(`Server error (${res.status}): ${text.substring(0, 100) || "Unable to reach verification API."}`);
       }
-    } catch {
-      setLookupError("Unable to connect to verification server. Please check internet connection.");
+    } catch (err: any) {
+      setLookupError(err?.message ? `Network error: ${err.message}` : "Unable to connect to verification server. Please check internet connection.");
     } finally {
       setLoading(false);
     }

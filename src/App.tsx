@@ -23,18 +23,44 @@ const RESERVED_SLUGS = [
   "favicon.ico",
   "robots.txt",
   "index.html",
+  "vite",
+  "@vite",
+  "health",
+  "status",
 ];
 
 function getInitialRoute(): { view: "portal" | "admin" | "tenant"; tenantSlug?: string } {
   if (typeof window === "undefined") return { view: "portal" };
 
-  // 1. Check Subdomain in Hostname (e.g. royalsweets.web.digimoms.in or royalsweets.localhost)
   const host = window.location.hostname.toLowerCase();
-  const hostParts = host.split(".");
-  if (hostParts.length >= 3) {
-    const sub = hostParts[0];
-    if (sub !== "web" && sub !== "www" && !RESERVED_SLUGS.includes(sub)) {
-      return { view: "tenant", tenantSlug: sub };
+
+  // Cloud preview domains (e.g. *.run.app, *.vercel.app) MUST NEVER be treated as tenant subdomains!
+  const isCloudHost =
+    host.endsWith(".run.app") ||
+    host.endsWith(".vercel.app") ||
+    host.endsWith(".appspot.com") ||
+    host.endsWith(".web.app") ||
+    host.endsWith(".firebaseapp.com") ||
+    host.endsWith(".onrender.com") ||
+    host.endsWith(".github.io");
+
+  // 1. Check Subdomain in Hostname ONLY for digimoms.in or local development (*.localhost)
+  if (!isCloudHost) {
+    if (host.endsWith(".web.digimoms.in")) {
+      const sub = host.replace(".web.digimoms.in", "").trim();
+      if (sub && sub !== "web" && sub !== "www" && !RESERVED_SLUGS.includes(sub)) {
+        return { view: "tenant", tenantSlug: sub };
+      }
+    } else if (host.endsWith(".digimoms.in")) {
+      const sub = host.replace(".digimoms.in", "").trim();
+      if (sub && sub !== "web" && sub !== "www" && !RESERVED_SLUGS.includes(sub)) {
+        return { view: "tenant", tenantSlug: sub };
+      }
+    } else if (host.endsWith(".localhost")) {
+      const sub = host.replace(".localhost", "").trim();
+      if (sub && !RESERVED_SLUGS.includes(sub)) {
+        return { view: "tenant", tenantSlug: sub };
+      }
     }
   }
 
@@ -47,6 +73,12 @@ function getInitialRoute(): { view: "portal" | "admin" | "tenant"; tenantSlug?: 
     return { view: "portal" };
   }
 
+  // Check if root or empty
+  if (path === "/" || path === "") {
+    return { view: "portal" };
+  }
+
+  // Check for tenant path (e.g. /royalsweets or /apexstudio)
   const match = path.match(/^\/([a-zA-Z0-9_-]+)(\/.*)?$/);
   if (match && match[1]) {
     const slug = match[1].toLowerCase();
