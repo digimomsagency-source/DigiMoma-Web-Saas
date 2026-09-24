@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { RenewalPortal } from "./components/RenewalPortal";
 import { AdminPortal } from "./components/AdminPortal";
 import { TenantWebsiteView } from "./components/TenantWebsiteView";
+import { LegalPagesModal, LegalTab } from "./components/LegalPages";
 import {
   Globe,
   Shield,
@@ -11,6 +12,7 @@ import {
   CheckCircle2,
   HelpCircle,
   ExternalLink,
+  FileText,
 } from "lucide-react";
 
 const RESERVED_SLUGS = [
@@ -93,6 +95,13 @@ function getInitialRoute(): { view: "portal" | "admin" | "tenant"; tenantSlug?: 
 export default function App() {
   const [routeInfo, setRouteInfo] = useState<{ view: "portal" | "admin" | "tenant"; tenantSlug?: string }>(getInitialRoute);
   const [showDeploymentManual, setShowDeploymentManual] = useState<boolean>(false);
+  const [legalModalOpen, setLegalModalOpen] = useState<boolean>(false);
+  const [legalTab, setLegalTab] = useState<LegalTab>("terms");
+
+  const openLegal = (tab: LegalTab) => {
+    setLegalTab(tab);
+    setLegalModalOpen(true);
+  };
 
   useEffect(() => {
     const handlePopState = () => {
@@ -141,10 +150,21 @@ export default function App() {
 
           {/* View Switcher Controls */}
           <div className="flex items-center gap-2">
+            <a
+              href="https://digimoms.in"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white rounded-xl text-xs font-medium border border-neutral-700 transition"
+              title="Official Agency Website for all services"
+            >
+              <span>Visit digimoms.in</span>
+              <ExternalLink className="w-3 h-3 text-neutral-400" />
+            </a>
+
             <nav className="flex bg-neutral-950 p-1 rounded-xl border border-neutral-800 text-xs font-semibold">
               <button
                 onClick={() => navigateTo("portal")}
-                className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
+                className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition cursor-pointer ${
                   currentView === "portal"
                     ? "bg-blue-600 text-white shadow-sm"
                     : "text-neutral-400 hover:text-white"
@@ -154,7 +174,7 @@ export default function App() {
               </button>
               <button
                 onClick={() => navigateTo("admin")}
-                className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition ${
+                className={`px-3.5 py-1.5 rounded-lg flex items-center gap-1.5 transition cursor-pointer ${
                   currentView === "admin"
                     ? "bg-blue-600 text-white shadow-sm"
                     : "text-neutral-400 hover:text-white"
@@ -165,8 +185,16 @@ export default function App() {
             </nav>
 
             <button
+              onClick={() => openLegal("terms")}
+              className="p-2 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-xl transition cursor-pointer"
+              title="Legal Policies & Terms"
+            >
+              <FileText className="w-4 h-4" />
+            </button>
+
+            <button
               onClick={() => setShowDeploymentManual(true)}
-              className="p-2 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-xl transition"
+              className="p-2 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-xl transition cursor-pointer"
               title="View Deployment Manual & Instructions"
             >
               <BookOpen className="w-4 h-4" />
@@ -185,19 +213,80 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="mt-16 border-t border-neutral-900 bg-neutral-950 px-4 py-8 text-center text-xs text-neutral-500">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
-            <span>Dedicated Multi-Tenant System running for <strong>web.digimoms.in</strong></span>
+      <footer className="mt-16 border-t border-neutral-900 bg-neutral-950 px-4 py-10 text-xs text-neutral-500">
+        <div className="max-w-7xl mx-auto space-y-6">
+          {/* Main agency callout */}
+          <div className="bg-neutral-900/60 border border-neutral-800 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 text-center sm:text-left">
+            <div>
+              <div className="text-white font-semibold text-sm">
+                Need a new website, custom software, or digital marketing?
+              </div>
+              <p className="text-neutral-400 text-xs mt-0.5">
+                This renewal portal is for existing client maintenance. For all other business inquiries, visit our main agency portal.
+              </p>
+            </div>
+            <a
+              href="https://digimoms.in"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white font-semibold rounded-lg text-xs transition shadow-sm shrink-0"
+            >
+              Visit digimoms.in <ExternalLink className="w-3.5 h-3.5" />
+            </a>
           </div>
-          <div className="flex items-center gap-4 text-neutral-400">
-            <span>PayU Server-to-Server Webhook Active</span>
-            <span>&bull;</span>
-            <span>Supabase Free Tier (500 MB Limit Tracker)</span>
+
+          {/* Links & Legal Row */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t border-neutral-900">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+              <span>Dedicated Multi-Tenant System running for <strong>web.digimoms.in</strong></span>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-neutral-400">
+              <button
+                onClick={() => openLegal("terms")}
+                className="hover:text-blue-400 transition cursor-pointer"
+              >
+                Terms &amp; Conditions
+              </button>
+              <span>&bull;</span>
+              <button
+                onClick={() => openLegal("privacy")}
+                className="hover:text-blue-400 transition cursor-pointer"
+              >
+                Privacy Policy
+              </button>
+              <span>&bull;</span>
+              <button
+                onClick={() => openLegal("refund")}
+                className="hover:text-blue-400 transition cursor-pointer"
+              >
+                Refund &amp; Cancellation
+              </button>
+              <span>&bull;</span>
+              <button
+                onClick={() => openLegal("contact")}
+                className="hover:text-blue-400 transition cursor-pointer"
+              >
+                Contact &amp; Grievance
+              </button>
+              <span>&bull;</span>
+              <span className="text-emerald-400">PayU Webhook Active</span>
+            </div>
+          </div>
+
+          <div className="text-center text-[11px] text-neutral-600 pt-1">
+            &copy; {new Date().getFullYear()} DigiMoms Agency. Official Domain: <a href="https://digimoms.in" target="_blank" rel="noopener noreferrer" className="text-neutral-500 hover:text-blue-400 underline">digimoms.in</a>. All rights reserved.
           </div>
         </div>
       </footer>
+
+      {/* LEGAL & COMPLIANCE MODAL */}
+      <LegalPagesModal
+        isOpen={legalModalOpen}
+        onClose={() => setLegalModalOpen(false)}
+        initialTab={legalTab}
+      />
 
       {/* DEPLOYMENT & MANUAL INSTRUCTIONS DRAWER/MODAL */}
       {showDeploymentManual && (
@@ -278,7 +367,7 @@ export default function App() {
                 <div className="font-mono text-[11px] text-neutral-400 space-y-1">
                   <div><code>/server.ts</code> &rarr; Standalone Node/Express backend with PayU Webhook &amp; DB RPC endpoints</div>
                   <div><code>/src/data/schema.sql</code> &rarr; Complete Supabase PostgreSQL table &amp; RLS migrations</div>
-                  <div><code>/src/components/StorageTracker.tsx</code> &rarr; 500MB Live Storage Tracker with 80% (400MB) warning banner</div>
+                  <div><code>/src/components/LegalPages.tsx</code> &rarr; Terms &amp; Conditions, Privacy Policy, &amp; PayU Refund Policy</div>
                   <div><code>/src/components/RenewalPortal.tsx</code> &rarr; Public Mobile Verification, Pricing Matrix, &amp; WhatsApp Domain Renewal</div>
                   <div><code>/src/components/AdminPortal.tsx</code> &rarr; Directory Ledger, Chronological Override, CMS Virtual Files &amp; Nuclear Purge</div>
                 </div>

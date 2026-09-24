@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from "react";
 import { Business, Transaction, Coupon, AppSettings, TenantFile } from "../types";
-import { StorageTracker } from "./StorageTracker";
 import { HostingFileManager } from "./HostingFileManager";
 import {
   Users,
@@ -684,9 +683,6 @@ export const AdminPortal: React.FC = () => {
 
   return (
     <div className="w-full max-w-7xl mx-auto space-y-6">
-      {/* 1. Live Supabase Storage Tracker & Warning Mechanism */}
-      <StorageTracker onRefreshTrigger={loadAdminData} />
-
       {/* Admin Navigation Bar */}
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-2 flex flex-wrap items-center justify-between gap-3 shadow-sm">
         <div className="flex flex-wrap items-center gap-1.5">
