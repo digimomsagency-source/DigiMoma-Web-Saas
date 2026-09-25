@@ -1,6 +1,7 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import path from "path";
+import fs from "fs";
 import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -80,7 +81,8 @@ let settingsStore: AppSettings = {
   one_year_price: 949,
   one_year_strike: 1188,
   supabase_url: process.env.SUPABASE_URL || "https://ybusnuarevpyyecuzxgv.supabase.co",
-  supabase_key: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidXNudWFyZXZweXllY3V6eGd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4ODU5OTcsImV4cCI6MjEwNTQ2MTk5N30.489xw5Q2QdvhSbhbHDsSWPycg9ztQDVKUHIR7mAYi7A",
+  supabase_key: process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidXNudWFyZXZweXllY3V6eGd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4ODU5OTcsImV4cCI6MjEwNTQ2MTk5N30.489xw5Q2QdvhSbhbHDsSWPycg9ztQDVKUHIR7mAYi7A",
+  supabase_service_role_key: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
   admin_password: process.env.ADMIN_PASSWORD || "Swastika4945@",
   simulated_db_size_mb: 48.5,
 };
@@ -205,16 +207,378 @@ const getBusinessFiles = (businessId: string): TenantFile[] => {
   return filesStore.get(businessId)!;
 };
 
-// Helper: Supabase client (if credentials provided)
+// Helper: Supabase client with priority on Service Role Key (bypasses RLS)
 function getSupabase(): SupabaseClient | null {
-  if (settingsStore.supabase_url && settingsStore.supabase_key) {
+  const url = process.env.SUPABASE_URL || settingsStore.supabase_url;
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    settingsStore.supabase_service_role_key ||
+    process.env.SUPABASE_ANON_KEY ||
+    settingsStore.supabase_key;
+
+  if (url && key) {
     try {
-      return createClient(settingsStore.supabase_url, settingsStore.supabase_key);
+      return createClient(url, key, {
+        auth: { persistSession: false },
+      });
     } catch {
       return null;
     }
   }
   return null;
+}
+
+// ----------------------------------------------------------------------------
+// PERSISTENCE ENGINE: MULTI-TIER SYNC (Local Disk Cache + Cloud Supabase PostgreSQL)
+// ----------------------------------------------------------------------------
+const CACHE_FILE_PATH = path.join("/tmp", "digimoms_db_cache.json");
+
+function loadLocalCache(): boolean {
+  try {
+    if (fs.existsSync(CACHE_FILE_PATH)) {
+      const raw = fs.readFileSync(CACHE_FILE_PATH, "utf-8");
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.businesses) && data.businesses.length > 0) {
+        businessesStore = data.businesses;
+      }
+      if (data.settings && typeof data.settings === "object") {
+        settingsStore = { ...settingsStore, ...data.settings };
+      }
+      if (Array.isArray(data.coupons) && data.coupons.length > 0) {
+        couponsStore = data.coupons;
+      }
+      if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+        transactionsStore = data.transactions;
+      }
+      if (data.files && typeof data.files === "object") {
+        for (const [bizId, files] of Object.entries(data.files)) {
+          if (Array.isArray(files)) {
+            filesStore.set(bizId, files as TenantFile[]);
+          }
+        }
+      }
+      return true;
+    }
+  } catch (err) {
+    // Non-fatal fallback
+  }
+  return false;
+}
+
+function saveLocalCache() {
+  try {
+    const filesObj: Record<string, TenantFile[]> = {};
+    for (const [bizId, files] of filesStore.entries()) {
+      filesObj[bizId] = files;
+    }
+    const data = {
+      businesses: businessesStore,
+      settings: settingsStore,
+      coupons: couponsStore,
+      transactions: transactionsStore,
+      files: filesObj,
+      saved_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(data, null, 2), "utf-8");
+  } catch (err) {
+    // Non-fatal fallback
+  }
+}
+
+// Immediately load cache if exists
+loadLocalCache();
+
+let isSyncingFromSupabase = false;
+let lastSupabaseSync = 0;
+
+async function syncFromSupabase(force = false) {
+  const now = Date.now();
+  if (!force && now - lastSupabaseSync < 4000) return;
+  if (isSyncingFromSupabase) return;
+
+  isSyncingFromSupabase = true;
+  lastSupabaseSync = now;
+
+  try {
+    const supabase = getSupabase();
+    if (!supabase) return;
+
+    // 1. Fetch businesses
+    const { data: dbBiz, error: bErr } = await supabase.from("businesses").select("*");
+    if (!bErr && dbBiz && dbBiz.length > 0) {
+      businessesStore = dbBiz.map((b: any) => ({
+        id: String(b.id),
+        name: b.name,
+        mobile: b.mobile,
+        subdomain: b.subdomain,
+        custom_domain: b.custom_domain || undefined,
+        plan_start_date: b.plan_start_date,
+        plan_end_date: b.plan_end_date,
+        service_date: b.service_date || b.plan_end_date,
+        status: b.status,
+        custom_pricing: b.custom_pricing || undefined,
+        created_at: b.created_at,
+        updated_at: b.updated_at,
+      }));
+    }
+
+    // 2. Fetch settings
+    const { data: dbSet, error: sErr } = await supabase.from("settings").select("*").limit(1).maybeSingle();
+    if (!sErr && dbSet) {
+      settingsStore = {
+        ...settingsStore,
+        ...dbSet,
+      };
+    }
+
+    // 3. Fetch coupons
+    const { data: dbCpn, error: cErr } = await supabase.from("coupons").select("*");
+    if (!cErr && dbCpn && dbCpn.length > 0) {
+      couponsStore = dbCpn;
+    }
+
+    // 4. Fetch transactions
+    const { data: dbTx, error: tErr } = await supabase.from("transactions").select("*").order("created_at", { ascending: false });
+    if (!tErr && dbTx && dbTx.length > 0) {
+      transactionsStore = dbTx;
+    }
+
+    // 5. Fetch tenant files
+    const { data: dbFiles, error: fErr } = await supabase.from("tenant_files").select("*");
+    if (!fErr && dbFiles && dbFiles.length > 0) {
+      const grouped = new Map<string, TenantFile[]>();
+      for (const f of dbFiles) {
+        if (!grouped.has(f.business_id)) {
+          grouped.set(f.business_id, []);
+        }
+        grouped.get(f.business_id)!.push({
+          id: f.id,
+          name: f.name,
+          path: f.path,
+          size: f.size || 0,
+          updated_at: f.updated_at,
+          content_type: f.content_type || "text/plain",
+          content: f.content || undefined,
+          is_directory: Boolean(f.is_directory),
+          parent_path: f.parent_path || "",
+        });
+      }
+      for (const [bizId, list] of grouped.entries()) {
+        filesStore.set(bizId, list);
+      }
+    }
+
+    saveLocalCache();
+  } catch (err) {
+    console.warn("[Supabase Sync Notice]:", err);
+  } finally {
+    isSyncingFromSupabase = false;
+  }
+}
+
+async function persistBusiness(business: Business): Promise<{ success: boolean; error?: string }> {
+  const idx = businessesStore.findIndex((b) => b.id === business.id);
+  if (idx >= 0) {
+    businessesStore[idx] = business;
+  } else {
+    businessesStore.unshift(business);
+  }
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+
+  try {
+    const payload = {
+      id: business.id,
+      name: business.name,
+      mobile: business.mobile,
+      subdomain: business.subdomain,
+      custom_domain: business.custom_domain || null,
+      plan_start_date: business.plan_start_date,
+      plan_end_date: business.plan_end_date,
+      service_date: business.service_date || business.plan_end_date,
+      status: business.status,
+      custom_pricing: business.custom_pricing || null,
+      created_at: business.created_at,
+      updated_at: business.updated_at,
+    };
+    const { error } = await supabase.from("businesses").upsert(payload, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Write Error on businesses]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function removeBusiness(id: string): Promise<void> {
+  businessesStore = businessesStore.filter((b) => b.id !== id);
+  filesStore.delete(id);
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from("tenant_files").delete().eq("business_id", id);
+      await supabase.from("businesses").delete().eq("id", id);
+    } catch (err) {
+      console.error("[Supabase Delete Error]:", err);
+    }
+  }
+}
+
+async function persistFile(file: TenantFile, businessId: string): Promise<{ success: boolean; error?: string }> {
+  const current = getBusinessFiles(businessId);
+  const idx = current.findIndex((f) => f.id === file.id);
+  if (idx >= 0) {
+    current[idx] = file;
+  } else {
+    current.push(file);
+  }
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+
+  try {
+    const payload = {
+      id: file.id,
+      business_id: businessId,
+      name: file.name,
+      path: file.path,
+      size: file.size || 0,
+      updated_at: file.updated_at || new Date().toISOString(),
+      content_type: file.content_type || "text/plain",
+      content: file.content || null,
+      is_directory: Boolean(file.is_directory),
+      parent_path: file.parent_path || "",
+    };
+    const { error } = await supabase.from("tenant_files").upsert(payload, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase CMS File Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function removeFile(fileId: string, businessId: string): Promise<void> {
+  const current = getBusinessFiles(businessId);
+  const updated = current.filter((f) => f.id !== fileId);
+  filesStore.set(businessId, updated);
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from("tenant_files").delete().eq("id", fileId);
+    } catch (err) {
+      console.error("[Supabase CMS File Delete Error]:", err);
+    }
+  }
+}
+
+async function persistSettings(settings: AppSettings): Promise<{ success: boolean; error?: string }> {
+  settingsStore = { ...settings };
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+
+  try {
+    const payload = {
+      id: "global_config",
+      payu_merchant_key: settings.payu_merchant_key,
+      payu_salt: settings.payu_salt,
+      payu_env: settings.payu_env,
+      whatsapp_number: settings.whatsapp_number,
+      whatsapp_message: settings.whatsapp_message,
+      monthly_price: settings.monthly_price,
+      monthly_strike: settings.monthly_strike,
+      six_month_price: settings.six_month_price,
+      six_month_strike: settings.six_month_strike,
+      one_year_price: settings.one_year_price,
+      one_year_strike: settings.one_year_strike,
+      admin_password: settings.admin_password,
+      simulated_db_size_mb: settings.simulated_db_size_mb,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await supabase.from("settings").upsert(payload, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Settings Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function persistCoupon(coupon: Coupon): Promise<{ success: boolean; error?: string }> {
+  const idx = couponsStore.findIndex((c) => c.id === coupon.id);
+  if (idx >= 0) {
+    couponsStore[idx] = coupon;
+  } else {
+    couponsStore.push(coupon);
+  }
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+
+  try {
+    const { error } = await supabase.from("coupons").upsert(coupon, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Coupon Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+async function removeCoupon(couponId: string): Promise<void> {
+  couponsStore = couponsStore.filter((c) => c.id !== couponId);
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from("coupons").delete().eq("id", couponId);
+    } catch (err) {
+      console.error("[Supabase Coupon Delete Error]:", err);
+    }
+  }
+}
+
+async function persistTransaction(tx: Transaction): Promise<{ success: boolean; error?: string }> {
+  const idx = transactionsStore.findIndex((t) => t.id === tx.id);
+  if (idx >= 0) {
+    transactionsStore[idx] = tx;
+  } else {
+    transactionsStore.unshift(tx);
+  }
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+
+  try {
+    const { error } = await supabase.from("transactions").upsert(tx, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Transaction Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -276,6 +640,70 @@ app.get("/api/db-size", async (_req: Request, res: Response) => {
   } as DatabaseSizeInfo);
 });
 
+// Supabase Connection & Health Status Verification
+app.get("/api/admin/supabase-status", checkAdminAuth, async (_req: Request, res: Response) => {
+  const supabase = getSupabase();
+  if (!supabase) {
+    return res.json({
+      connected: false,
+      message: "No Supabase URL or key configured.",
+    });
+  }
+
+  let tableBusinessesOk = false;
+  let tableFilesOk = false;
+  let rlsRestricted = false;
+  let writeTestOk = false;
+  let errorMessage = "";
+
+  try {
+    const { error: bErr } = await supabase.from("businesses").select("id").limit(1);
+    if (!bErr) tableBusinessesOk = true;
+    else errorMessage = bErr.message;
+
+    const { error: fErr } = await supabase.from("tenant_files").select("id").limit(1);
+    if (!fErr) tableFilesOk = true;
+
+    // Test write permission
+    const testId = "__digimoms_health_probe__";
+    const { error: wErr } = await supabase.from("businesses").upsert({
+      id: testId,
+      name: "Probe",
+      mobile: "0000000000",
+      subdomain: "__probe__",
+      plan_end_date: new Date().toISOString(),
+      status: "Inactive",
+    }, { onConflict: "id" });
+
+    if (wErr) {
+      if (wErr.code === "42501") {
+        rlsRestricted = true;
+        errorMessage = "Supabase RLS is currently blocking write operations (Error 42501). Run the SQL script from 'SQL & Host Routing Guide' or add SUPABASE_SERVICE_ROLE_KEY to enable permanent cloud persistence.";
+      } else {
+        errorMessage = wErr.message;
+      }
+    } else {
+      writeTestOk = true;
+      await supabase.from("businesses").delete().eq("id", testId);
+    }
+  } catch (err: any) {
+    errorMessage = err.message || "Failed to query Supabase";
+  }
+
+  res.json({
+    connected: tableBusinessesOk,
+    tables_exist: {
+      businesses: tableBusinessesOk,
+      tenant_files: tableFilesOk,
+    },
+    writable: writeTestOk,
+    rls_restricted: rlsRestricted,
+    message: writeTestOk
+      ? "Supabase connected and fully writable! Changes will persist permanently across all sessions."
+      : errorMessage,
+  });
+});
+
 // Admin toggle to set simulated DB size (to test the 80% / 400MB threshold immediately!)
 app.post("/api/admin/set-db-size", (req: Request, res: Response) => {
   const { size_mb } = req.body;
@@ -287,37 +715,46 @@ app.post("/api/admin/set-db-size", (req: Request, res: Response) => {
 });
 
 // ----------------------------------------------------------------------------
-// 2. SYSTEM RENEWAL PORTAL: MOBILE INPUT VERIFICATION & LOOKUP
+// 2. SYSTEM RENEWAL PORTAL: MOBILE & SUBDOMAIN INPUT VERIFICATION & LOOKUP
 // ----------------------------------------------------------------------------
-app.get("/api/business/lookup", (req: Request, res: Response) => {
+app.get("/api/business/lookup", async (req: Request, res: Response) => {
+  await syncFromSupabase();
+
   const mobile = String(req.query.mobile || "").trim();
-  if (!mobile) {
-    return res.status(400).json({ error: "Mobile number is required" });
+  const subdomain = String(req.query.subdomain || "").trim();
+
+  if (!mobile && !subdomain) {
+    return res.status(400).json({ error: "Mobile number or subdomain is required" });
   }
 
-  // Sanitize mobile format (handles with or without country code)
-  const cleanMobile = mobile.replace(/[^0-9]/g, "").slice(-10);
-
-  const business = businessesStore.find((b) => b.mobile.replace(/[^0-9]/g, "").slice(-10) === cleanMobile);
+  let business: Business | undefined;
+  if (mobile) {
+    const cleanMobile = mobile.replace(/[^0-9]/g, "").slice(-10);
+    business = businessesStore.find((b) => b.mobile.replace(/[^0-9]/g, "").slice(-10) === cleanMobile);
+  } else if (subdomain) {
+    business = businessesStore.find((b) => b.subdomain.toLowerCase() === subdomain.toLowerCase());
+  }
 
   if (!business) {
     return res.status(404).json({
-      error: "No registered business found with this mobile number. Please check the number or contact DigiMoms Support.",
+      error: "No registered business found. Please check details or contact DigiMoms Support.",
     });
   }
 
   // Check validity: if current date is greater than plan_end_date, mark store as 'Inactive'
   const now = new Date();
   const endDate = new Date(business.plan_end_date);
-  const isExpired = now.getTime() > endDate.getTime();
+  const isPastEndDate = now.getTime() > endDate.getTime();
+  const isExpired = isPastEndDate || business.status === "Inactive";
 
-  if (isExpired && business.status === "Active") {
+  if (isPastEndDate && business.status === "Active") {
     business.status = "Inactive";
     business.updated_at = now.toISOString();
+    await persistBusiness(business);
   }
 
   const diffTime = endDate.getTime() - now.getTime();
-  const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  const daysRemaining = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
 
   const effectivePricing = (business.custom_pricing && business.custom_pricing.use_custom) ? {
     monthly_price: business.custom_pricing.monthly_price ?? settingsStore.monthly_price,

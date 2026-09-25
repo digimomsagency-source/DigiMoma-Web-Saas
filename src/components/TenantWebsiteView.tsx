@@ -1,13 +1,156 @@
-import React, { useState } from "react";
-import { Globe, Shield, CreditCard, ChevronDown, ChevronUp, ArrowLeft } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Globe, Shield, CreditCard, ChevronDown, ChevronUp, ArrowLeft, AlertTriangle, MessageCircle, ExternalLink, RefreshCw } from "lucide-react";
 
 interface TenantWebsiteViewProps {
   subdomain: string;
 }
 
+interface BusinessStatus {
+  id: string;
+  name: string;
+  mobile: string;
+  subdomain: string;
+  status: string;
+  is_expired: boolean;
+  plan_end_date: string;
+  days_remaining?: number;
+}
+
 export function TenantWebsiteView({ subdomain }: TenantWebsiteViewProps) {
   const [badgeMinimized, setBadgeMinimized] = useState<boolean>(false);
+  const [business, setBusiness] = useState<BusinessStatus | null>(null);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [notFound, setNotFound] = useState<boolean>(false);
 
+  useEffect(() => {
+    let isMounted = true;
+    async function checkStatus() {
+      try {
+        setLoading(true);
+        const res = await fetch(`/api/business/lookup?subdomain=${encodeURIComponent(subdomain)}`);
+        if (res.status === 404) {
+          if (isMounted) setNotFound(true);
+          return;
+        }
+        const data = await res.json();
+        if (isMounted && data.business) {
+          setBusiness(data.business);
+        }
+      } catch (err) {
+        console.error("Failed to verify tenant validity:", err);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    }
+    checkStatus();
+    return () => {
+      isMounted = false;
+    };
+  }, [subdomain]);
+
+  // Case 1: Tenant is explicitly expired or marked Inactive -> Show suspension screen immediately
+  const isExpired = business && (business.is_expired || business.status === "Inactive" || new Date(business.plan_end_date).getTime() < Date.now());
+
+  if (!loading && isExpired && business) {
+    const expiryFormatted = new Date(business.plan_end_date).toLocaleDateString("en-IN", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+
+    return (
+      <div className="fixed inset-0 z-50 w-screen h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-4 sm:p-6 overflow-y-auto">
+        <div className="w-full max-w-lg bg-neutral-900 border border-neutral-800 rounded-3xl p-6 sm:p-10 text-center shadow-2xl relative overflow-hidden">
+          {/* Top highlight glow */}
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-1 bg-red-500 rounded-full blur-[2px]" />
+
+          {/* Status Badge */}
+          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-red-950/80 border border-red-700/60 text-red-300 text-xs font-bold tracking-wide uppercase mb-6">
+            <span className="w-2 h-2 rounded-full bg-red-400 animate-ping" />
+            <AlertTriangle className="w-4 h-4 text-red-400" />
+            Website Suspended &bull; Renewal Required
+          </div>
+
+          {/* Business Details */}
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight mb-2">
+            {business.name}
+          </h1>
+          <p className="text-xs sm:text-sm text-neutral-400 font-mono mb-4">
+            web.digimoms.in/{business.subdomain}
+          </p>
+
+          <p className="text-sm text-neutral-300 leading-relaxed mb-6">
+            This business website subscription validity expired on{" "}
+            <strong className="text-white font-semibold">{expiryFormatted}</strong>.
+            Public website rendering is temporarily suspended until domain renewal is completed.
+          </p>
+
+          {/* Action Buttons */}
+          <div className="space-y-3">
+            <a
+              href={`/portal?mobile=${encodeURIComponent(business.mobile)}`}
+              className="w-full py-3.5 px-6 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-bold rounded-xl text-sm flex items-center justify-center gap-2 shadow-lg shadow-blue-900/40 transition cursor-pointer"
+            >
+              <CreditCard className="w-4 h-4" /> Renew Store Subscription Now
+            </a>
+
+            <a
+              href={`https://wa.me/919475388085?text=Hello%20DigiMoms,%20my%20business%20website%20${encodeURIComponent(business.name)}%20(web.digimoms.in/${encodeURIComponent(business.subdomain)})%20is%20suspended.%20Please%20help%20me%20renew.`}
+              target="_blank"
+              rel="noreferrer"
+              className="w-full py-3 px-6 bg-emerald-700/20 hover:bg-emerald-700/30 border border-emerald-600/40 text-emerald-300 font-semibold rounded-xl text-xs flex items-center justify-center gap-2 transition"
+            >
+              <MessageCircle className="w-4 h-4" /> Contact DigiMoms Support on WhatsApp
+            </a>
+          </div>
+
+          {/* Agency Callout */}
+          <div className="mt-8 pt-6 border-t border-neutral-800 text-xs text-neutral-500 space-y-2">
+            <div>
+              Looking for custom website design, e-commerce, or marketing?{" "}
+              <a
+                href="https://digimoms.in"
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-400 hover:underline font-medium inline-flex items-center gap-1"
+              >
+                Visit digimoms.in <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+            <div>
+              <a href="/portal" className="text-neutral-400 hover:text-white transition">
+                &larr; Back to DigiMoms Renewal Portal
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Case 2: Business 404
+  if (!loading && notFound) {
+    return (
+      <div className="fixed inset-0 z-50 w-screen h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-6 text-center">
+        <div className="max-w-md bg-neutral-900 border border-neutral-800 rounded-2xl p-8">
+          <Globe className="w-12 h-12 text-neutral-500 mx-auto mb-4" />
+          <h2 className="text-xl font-bold mb-2">404 - Business Not Found</h2>
+          <p className="text-sm text-neutral-400 mb-6">
+            No registered client website found under address: <br />
+            <code className="text-blue-400 font-mono text-xs">web.digimoms.in/{subdomain}</code>
+          </p>
+          <a
+            href="/portal"
+            className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-xl text-xs inline-flex items-center gap-2 transition"
+          >
+            Go to DigiMoms Portal
+          </a>
+        </div>
+      </div>
+    );
+  }
+
+  // Case 3: Business is Active or Loading -> Render Iframe
   return (
     <div className="fixed inset-0 z-50 w-screen h-screen bg-white overflow-hidden flex flex-col">
       {/* Full-screen Tenant Website Render Frame */}
@@ -53,7 +196,7 @@ export function TenantWebsiteView({ subdomain }: TenantWebsiteViewProps) {
 
             <div className="mt-2.5 flex items-center gap-2 text-[11px]">
               <a
-                href="/portal"
+                href={business?.mobile ? `/portal?mobile=${encodeURIComponent(business.mobile)}` : "/portal"}
                 className="flex-1 px-2.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-lg flex items-center justify-center gap-1 transition text-center"
               >
                 <CreditCard className="w-3 h-3" /> Renew Domain

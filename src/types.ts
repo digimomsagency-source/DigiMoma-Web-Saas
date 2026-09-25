@@ -65,6 +65,7 @@ export interface AppSettings {
   one_year_strike: number;
   supabase_url: string;
   supabase_key: string;
+  supabase_service_role_key?: string;
   admin_password: string;
   simulated_db_size_mb?: number; // For testing storage alert trigger
 }

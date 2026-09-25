@@ -84,7 +84,13 @@ function getInitialRoute(): { view: "portal" | "admin" | "tenant"; tenantSlug?: 
   const match = path.match(/^\/([a-zA-Z0-9_-]+)(\/.*)?$/);
   if (match && match[1]) {
     const slug = match[1].toLowerCase();
-    if (!RESERVED_SLUGS.includes(slug)) {
+    const isSystemOrPreview =
+      slug.startsWith("ais-") ||
+      slug.includes("ais-dev") ||
+      slug.includes("ais-pre") ||
+      slug.length > 35;
+
+    if (!RESERVED_SLUGS.includes(slug) && !isSystemOrPreview) {
       return { view: "tenant", tenantSlug: slug };
     }
   }
