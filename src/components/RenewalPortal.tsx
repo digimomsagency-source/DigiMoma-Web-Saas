@@ -26,7 +26,7 @@ interface RenewalPortalProps {
 export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onOpenAdmin }) => {
   const [mobileInput, setMobileInput] = useState<string>(initialMobile || "");
   const [loading, setLoading] = useState<boolean>(false);
-  const [business, setBusiness] = useState<(Business & { days_remaining: number; is_expired: boolean }) | null>(null);
+  const [business, setBusiness] = useState<(Business & { days_remaining: number; is_expired: boolean; effective_pricing?: any }) | null>(null);
   const [lookupError, setLookupError] = useState<string | null>(null);
 
   // Settings & Pricing Matrix from Admin
@@ -128,8 +128,31 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
     }
   };
 
-  // Pricing helper
+  // Pricing helper with prioritized Per-Client Custom Pricing
   const getTierPrice = (tier: "monthly" | "six_month" | "one_year") => {
+    const eff = business?.effective_pricing;
+    const cust = business?.custom_pricing;
+    const hasCustom = Boolean((eff && eff.is_custom) || (cust && cust.use_custom));
+
+    if (hasCustom) {
+      const source = eff || cust;
+      if (tier === "monthly" && source?.monthly_price !== undefined) {
+        const cost = Number(source.monthly_price);
+        const strike = source.monthly_strike !== undefined ? Number(source.monthly_strike) : Math.round(cost * 1.5);
+        return { cost, strike };
+      }
+      if (tier === "six_month" && source?.six_month_price !== undefined) {
+        const cost = Number(source.six_month_price);
+        const strike = source.six_month_strike !== undefined ? Number(source.six_month_strike) : Math.round(cost * 1.3);
+        return { cost, strike };
+      }
+      if (tier === "one_year" && source?.one_year_price !== undefined) {
+        const cost = Number(source.one_year_price);
+        const strike = source.one_year_strike !== undefined ? Number(source.one_year_strike) : Math.round(cost * 1.25);
+        return { cost, strike };
+      }
+    }
+
     if (!settings) {
       if (tier === "monthly") return { cost: 99, strike: 999 };
       if (tier === "six_month") return { cost: 499, strike: 594 };
@@ -484,6 +507,12 @@ export const RenewalPortal: React.FC<RenewalPortalProps> = ({ initialMobile, onO
 
             {/* Package Selection Matrix & Coupon */}
             <div className="mt-6 space-y-6">
+              {Boolean(business?.effective_pricing?.is_custom || business?.custom_pricing?.use_custom) && (
+                <div className="p-3 bg-amber-950/40 border border-amber-800/60 rounded-xl flex items-center gap-2 text-xs text-amber-300">
+                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                  <span>Exclusive Custom Plan: Special rates applied for <strong>{business.name}</strong></span>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-semibold uppercase tracking-wider text-neutral-400">
                     Select Renewal Tier

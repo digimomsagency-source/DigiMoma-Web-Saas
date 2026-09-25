@@ -229,17 +229,42 @@ function getSupabase(): SupabaseClient | null {
 }
 
 // ----------------------------------------------------------------------------
-// PERSISTENCE ENGINE: MULTI-TIER SYNC (Local Disk Cache + Cloud Supabase PostgreSQL)
+// PERSISTENCE ENGINE: MULTI-TIER SYNC (Persistent Disk File + Cloud Supabase PostgreSQL)
 // ----------------------------------------------------------------------------
+const WORKSPACE_DATA_DIR = path.join(process.cwd(), "data");
+const PERSISTENT_STORE_PATH = path.join(WORKSPACE_DATA_DIR, "digimoms_store.json");
 const CACHE_FILE_PATH = path.join("/tmp", "digimoms_db_cache.json");
+
+// Helper: Check if business subscription is expired
+function isBusinessExpired(business: Business): boolean {
+  if (!business) return true;
+  if (business.status === "Inactive") return true;
+  const endMs = new Date(business.plan_end_date).getTime();
+  if (isNaN(endMs) || Date.now() >= endMs) return true;
+  return false;
+}
+
+// Helper: Automatically ensure business status reflects chronological validity
+function refreshBusinessStatus(business: Business): Business {
+  if (isBusinessExpired(business)) {
+    business.status = "Inactive";
+  }
+  return business;
+}
 
 function loadLocalCache(): boolean {
   try {
-    if (fs.existsSync(CACHE_FILE_PATH)) {
-      const raw = fs.readFileSync(CACHE_FILE_PATH, "utf-8");
+    let raw = "";
+    if (fs.existsSync(PERSISTENT_STORE_PATH)) {
+      raw = fs.readFileSync(PERSISTENT_STORE_PATH, "utf-8");
+    } else if (fs.existsSync(CACHE_FILE_PATH)) {
+      raw = fs.readFileSync(CACHE_FILE_PATH, "utf-8");
+    }
+
+    if (raw) {
       const data = JSON.parse(raw);
       if (Array.isArray(data.businesses) && data.businesses.length > 0) {
-        businessesStore = data.businesses;
+        businessesStore = data.businesses.map((b: Business) => refreshBusinessStatus({ ...b }));
       }
       if (data.settings && typeof data.settings === "object") {
         settingsStore = { ...settingsStore, ...data.settings };
@@ -260,7 +285,7 @@ function loadLocalCache(): boolean {
       return true;
     }
   } catch (err) {
-    // Non-fatal fallback
+    console.warn("[Storage Load Warning]:", err);
   }
   return false;
 }
@@ -279,9 +304,26 @@ function saveLocalCache() {
       files: filesObj,
       saved_at: new Date().toISOString(),
     };
-    fs.writeFileSync(CACHE_FILE_PATH, JSON.stringify(data, null, 2), "utf-8");
+    const jsonStr = JSON.stringify(data, null, 2);
+
+    // 1. Write to persistent workspace disk store (survives dev server reloads)
+    try {
+      if (!fs.existsSync(WORKSPACE_DATA_DIR)) {
+        fs.mkdirSync(WORKSPACE_DATA_DIR, { recursive: true });
+      }
+      fs.writeFileSync(PERSISTENT_STORE_PATH, jsonStr, "utf-8");
+    } catch (e) {
+      console.warn("[Workspace Disk Write Notice]:", e);
+    }
+
+    // 2. Write to system tmp cache
+    try {
+      fs.writeFileSync(CACHE_FILE_PATH, jsonStr, "utf-8");
+    } catch (e) {
+      // Non-fatal
+    }
   } catch (err) {
-    // Non-fatal fallback
+    console.error("[Storage Save Fatal Error]:", err);
   }
 }
 
@@ -293,7 +335,7 @@ let lastSupabaseSync = 0;
 
 async function syncFromSupabase(force = false) {
   const now = Date.now();
-  if (!force && now - lastSupabaseSync < 4000) return;
+  if (!force && now - lastSupabaseSync < 10000) return;
   if (isSyncingFromSupabase) return;
 
   isSyncingFromSupabase = true;
@@ -303,28 +345,49 @@ async function syncFromSupabase(force = false) {
     const supabase = getSupabase();
     if (!supabase) return;
 
-    // 1. Fetch businesses
+    // 1. Fetch businesses with intelligent merging (never overwrite newer local modifications)
     const { data: dbBiz, error: bErr } = await supabase.from("businesses").select("*");
-    if (!bErr && dbBiz && dbBiz.length > 0) {
-      businessesStore = dbBiz.map((b: any) => ({
-        id: String(b.id),
-        name: b.name,
-        mobile: b.mobile,
-        subdomain: b.subdomain,
-        custom_domain: b.custom_domain || undefined,
-        plan_start_date: b.plan_start_date,
-        plan_end_date: b.plan_end_date,
-        service_date: b.service_date || b.plan_end_date,
-        status: b.status,
-        custom_pricing: b.custom_pricing || undefined,
-        created_at: b.created_at,
-        updated_at: b.updated_at,
-      }));
+    if (!bErr && Array.isArray(dbBiz) && dbBiz.length > 0) {
+      for (const b of dbBiz) {
+        const remoteUpdated = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+        const existingIdx = businessesStore.findIndex(
+          (x) => x.id === String(b.id) || x.subdomain.toLowerCase() === String(b.subdomain).toLowerCase()
+        );
+
+        const mapped: Business = {
+          id: String(b.id),
+          name: b.name,
+          mobile: b.mobile,
+          subdomain: b.subdomain,
+          custom_domain: b.custom_domain || undefined,
+          plan_start_date: b.plan_start_date,
+          plan_end_date: b.plan_end_date,
+          service_date: b.service_date || b.plan_end_date,
+          status: b.status,
+          custom_pricing: b.custom_pricing || undefined,
+          created_at: b.created_at,
+          updated_at: b.updated_at || new Date().toISOString(),
+        };
+        refreshBusinessStatus(mapped);
+
+        if (existingIdx >= 0) {
+          const local = businessesStore[existingIdx];
+          const localUpdated = local.updated_at ? new Date(local.updated_at).getTime() : 0;
+          if (remoteUpdated > localUpdated) {
+            businessesStore[existingIdx] = mapped;
+          } else if (localUpdated > remoteUpdated) {
+            // Local is newer: push update to Supabase
+            persistBusiness(local).catch(() => {});
+          }
+        } else {
+          businessesStore.push(mapped);
+        }
+      }
     }
 
     // 2. Fetch settings
     const { data: dbSet, error: sErr } = await supabase.from("settings").select("*").limit(1).maybeSingle();
-    if (!sErr && dbSet) {
+    if (!sErr && dbSet && dbSet.monthly_price) {
       settingsStore = {
         ...settingsStore,
         ...dbSet,
@@ -333,39 +396,56 @@ async function syncFromSupabase(force = false) {
 
     // 3. Fetch coupons
     const { data: dbCpn, error: cErr } = await supabase.from("coupons").select("*");
-    if (!cErr && dbCpn && dbCpn.length > 0) {
-      couponsStore = dbCpn;
+    if (!cErr && Array.isArray(dbCpn) && dbCpn.length > 0) {
+      for (const c of dbCpn) {
+        if (!couponsStore.some((x) => x.id === c.id || x.code === c.code)) {
+          couponsStore.push(c);
+        }
+      }
     }
 
     // 4. Fetch transactions
     const { data: dbTx, error: tErr } = await supabase.from("transactions").select("*").order("created_at", { ascending: false });
-    if (!tErr && dbTx && dbTx.length > 0) {
-      transactionsStore = dbTx;
+    if (!tErr && Array.isArray(dbTx) && dbTx.length > 0) {
+      for (const t of dbTx) {
+        if (!transactionsStore.some((x) => x.id === t.id || x.payu_txnid === t.payu_txnid)) {
+          transactionsStore.push(t);
+        }
+      }
     }
 
-    // 5. Fetch tenant files
-    const { data: dbFiles, error: fErr } = await supabase.from("tenant_files").select("*");
-    if (!fErr && dbFiles && dbFiles.length > 0) {
-      const grouped = new Map<string, TenantFile[]>();
-      for (const f of dbFiles) {
-        if (!grouped.has(f.business_id)) {
-          grouped.set(f.business_id, []);
+    // 5. Fetch tenant files with non-destructive merge
+    try {
+      const { data: dbFiles, error: fErr } = await supabase.from("tenant_files").select("*");
+      if (!fErr && Array.isArray(dbFiles) && dbFiles.length > 0) {
+        for (const f of dbFiles) {
+          const bizFiles = getBusinessFiles(f.business_id);
+          const existingIdx = bizFiles.findIndex((x) => x.id === f.id || x.path.toLowerCase() === f.path.toLowerCase());
+          const remoteUpdated = f.updated_at ? new Date(f.updated_at).getTime() : 0;
+          const fileRecord: TenantFile = {
+            id: f.id,
+            name: f.name,
+            path: f.path,
+            size: f.size || 0,
+            updated_at: f.updated_at,
+            content_type: f.content_type || "text/plain",
+            content: f.content || undefined,
+            is_directory: Boolean(f.is_directory),
+            parent_path: f.parent_path || "",
+          };
+
+          if (existingIdx >= 0) {
+            const localUpdated = bizFiles[existingIdx].updated_at ? new Date(bizFiles[existingIdx].updated_at).getTime() : 0;
+            if (remoteUpdated > localUpdated) {
+              bizFiles[existingIdx] = fileRecord;
+            }
+          } else {
+            bizFiles.push(fileRecord);
+          }
         }
-        grouped.get(f.business_id)!.push({
-          id: f.id,
-          name: f.name,
-          path: f.path,
-          size: f.size || 0,
-          updated_at: f.updated_at,
-          content_type: f.content_type || "text/plain",
-          content: f.content || undefined,
-          is_directory: Boolean(f.is_directory),
-          parent_path: f.parent_path || "",
-        });
       }
-      for (const [bizId, list] of grouped.entries()) {
-        filesStore.set(bizId, list);
-      }
+    } catch {
+      // Supabase tenant_files table may not exist yet; ignore
     }
 
     saveLocalCache();
@@ -664,8 +744,8 @@ app.get("/api/admin/supabase-status", checkAdminAuth, async (_req: Request, res:
     const { error: fErr } = await supabase.from("tenant_files").select("id").limit(1);
     if (!fErr) tableFilesOk = true;
 
-    // Test write permission
-    const testId = "__digimoms_health_probe__";
+    // Test write permission using a valid UUID format
+    const testId = "00000000-0000-0000-0000-000000000000";
     const { error: wErr } = await supabase.from("businesses").upsert({
       id: testId,
       name: "Probe",
@@ -709,6 +789,7 @@ app.post("/api/admin/set-db-size", (req: Request, res: Response) => {
   const { size_mb } = req.body;
   if (typeof size_mb === "number") {
     settingsStore.simulated_db_size_mb = size_mb;
+    saveLocalCache();
     return res.json({ success: true, simulated_db_size_mb: size_mb });
   }
   return res.status(400).json({ error: "Invalid size_mb" });
@@ -717,9 +798,7 @@ app.post("/api/admin/set-db-size", (req: Request, res: Response) => {
 // ----------------------------------------------------------------------------
 // 2. SYSTEM RENEWAL PORTAL: MOBILE & SUBDOMAIN INPUT VERIFICATION & LOOKUP
 // ----------------------------------------------------------------------------
-app.get("/api/business/lookup", async (req: Request, res: Response) => {
-  await syncFromSupabase();
-
+app.get("/api/business/lookup", (req: Request, res: Response) => {
   const mobile = String(req.query.mobile || "").trim();
   const subdomain = String(req.query.subdomain || "").trim();
 
@@ -741,20 +820,19 @@ app.get("/api/business/lookup", async (req: Request, res: Response) => {
     });
   }
 
-  // Check validity: if current date is greater than plan_end_date, mark store as 'Inactive'
-  const now = new Date();
-  const endDate = new Date(business.plan_end_date);
-  const isPastEndDate = now.getTime() > endDate.getTime();
-  const isExpired = isPastEndDate || business.status === "Inactive";
-
-  if (isPastEndDate && business.status === "Active") {
+  // Refresh status and check chronological validity
+  const isExpired = isBusinessExpired(business);
+  if (isExpired && business.status === "Active") {
     business.status = "Inactive";
-    business.updated_at = now.toISOString();
-    await persistBusiness(business);
+    business.updated_at = new Date().toISOString();
+    saveLocalCache();
+    persistBusiness(business).catch(() => {});
   }
 
+  const now = new Date();
+  const endDate = new Date(business.plan_end_date);
   const diffTime = endDate.getTime() - now.getTime();
-  const daysRemaining = Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+  const daysRemaining = isExpired ? 0 : Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
 
   const effectivePricing = (business.custom_pricing && business.custom_pricing.use_custom) ? {
     monthly_price: business.custom_pricing.monthly_price ?? settingsStore.monthly_price,
@@ -1246,13 +1324,16 @@ app.post("/api/admin/change-password", checkAdminAuth, (req: Request, res: Respo
 
 // Business Directory & Ledger (Get all businesses)
 app.get("/api/admin/businesses", checkAdminAuth, (_req: Request, res: Response) => {
-  // Recalculate expiry status dynamically
-  const now = new Date();
+  // Recalculate expiry status dynamically across all records
+  let changed = false;
   businessesStore.forEach((b) => {
-    if (now.getTime() > new Date(b.plan_end_date).getTime() && b.status === "Active") {
-      b.status = "Inactive";
-    }
+    const prevStatus = b.status;
+    refreshBusinessStatus(b);
+    if (b.status !== prevStatus) changed = true;
   });
+  if (changed) {
+    saveLocalCache();
+  }
 
   res.json({
     businesses: businessesStore,
@@ -1280,7 +1361,7 @@ app.post("/api/admin/businesses", checkAdminAuth, (req: Request, res: Response) 
 
   const newBusiness: Business = {
     id: `biz-${Date.now()}`,
-    name,
+    name: name.trim(),
     mobile: mobile.trim(),
     subdomain: cleanSubdomain,
     custom_domain: custom_domain ? custom_domain.trim() : undefined,
@@ -1292,8 +1373,14 @@ app.post("/api/admin/businesses", checkAdminAuth, (req: Request, res: Response) 
     updated_at: new Date().toISOString(),
   };
 
+  refreshBusinessStatus(newBusiness);
   businessesStore.unshift(newBusiness);
   filesStore.set(newBusiness.id, []);
+
+  saveLocalCache();
+  persistBusiness(newBusiness).catch((err) => {
+    console.warn("[Supabase Write Notice]:", err);
+  });
 
   res.json({ success: true, business: newBusiness });
 });
@@ -1313,16 +1400,26 @@ app.patch("/api/admin/businesses/:id/override", checkAdminAuth, (req: Request, r
   }
   if (service_date) {
     business.service_date = new Date(service_date).toISOString();
-  }
-  if (status && (status === "Active" || status === "Inactive")) {
-    business.status = status;
   } else if (plan_end_date) {
-    // Auto adjust status according to new date
-    const now = new Date();
-    business.status = new Date(business.plan_end_date).getTime() >= now.getTime() ? "Active" : "Inactive";
+    business.service_date = business.plan_end_date;
+  }
+
+  // Enforce chronological validity
+  const endMs = new Date(business.plan_end_date).getTime();
+  if (isNaN(endMs) || endMs <= Date.now()) {
+    business.status = "Inactive"; // Forced offline when expired
+  } else if (status === "Inactive") {
+    business.status = "Inactive";
+  } else {
+    business.status = "Active";
   }
 
   business.updated_at = new Date().toISOString();
+
+  saveLocalCache();
+  persistBusiness(business).catch((err) => {
+    console.warn("[Supabase Write Notice]:", err);
+  });
 
   res.json({
     success: true,
@@ -1344,7 +1441,6 @@ app.put("/api/admin/businesses/:id/plan", checkAdminAuth, (req: Request, res: Re
     service_date,
     status,
     extension_days,
-    plan_tier_name,
     custom_pricing,
   } = req.body;
 
@@ -1383,7 +1479,6 @@ app.put("/api/admin/businesses/:id/plan", checkAdminAuth, (req: Request, res: Re
     baseDate.setDate(baseDate.getDate() + Number(extension_days));
     business.plan_end_date = baseDate.toISOString();
     business.service_date = baseDate.toISOString();
-    business.status = "Active";
   } else if (plan_end_date) {
     business.plan_end_date = new Date(plan_end_date).toISOString();
     if (service_date) {
@@ -1393,6 +1488,7 @@ app.put("/api/admin/businesses/:id/plan", checkAdminAuth, (req: Request, res: Re
     }
   }
 
+  // Update Custom Pricing (Per-Client Pricing Plan)
   if (custom_pricing !== undefined) {
     if (custom_pricing === null || custom_pricing.use_custom === false) {
       business.custom_pricing = { use_custom: false };
@@ -1409,16 +1505,28 @@ app.put("/api/admin/businesses/:id/plan", checkAdminAuth, (req: Request, res: Re
     }
   }
 
-  if (status && (status === "Active" || status === "Inactive")) {
-    business.status = status;
-  } else if (business.plan_end_date) {
-    const now = new Date();
-    business.status = new Date(business.plan_end_date).getTime() >= now.getTime() ? "Active" : "Inactive";
+  // STRICT EXPIRATION ENFORCEMENT:
+  // If plan_end_date is today or in the past, website MUST turn Inactive/Suspended (Web is OFF)!
+  const endMs = new Date(business.plan_end_date).getTime();
+  if (isNaN(endMs) || endMs <= Date.now()) {
+    business.status = "Inactive";
+  } else if (status === "Inactive") {
+    business.status = "Inactive";
+  } else {
+    business.status = "Active";
   }
 
   business.updated_at = new Date().toISOString();
 
-  console.log(`[Admin Manual Plan Edit] Updated business '${business.name}' plan: ${business.status}, ends ${business.plan_end_date}`);
+  // Save to persistent storage file and tmp cache immediately
+  saveLocalCache();
+
+  // Asynchronously sync to Supabase
+  persistBusiness(business).catch((err) => {
+    console.warn("[Supabase Write Notice on Plan Update]:", err);
+  });
+
+  console.log(`[Admin Manual Plan Edit] Saved business '${business.name}': status=${business.status}, ends=${business.plan_end_date}`);
 
   return res.json({
     success: true,
@@ -1456,6 +1564,9 @@ app.post("/api/admin/settings", checkAdminAuth, (req: Request, res: Response) =>
     one_year_strike: Number(incoming.one_year_strike ?? settingsStore.one_year_strike),
   };
 
+  saveLocalCache();
+  persistSettings(settingsStore).catch(() => {});
+
   res.json({
     success: true,
     message: "System global settings updated successfully",
@@ -1489,6 +1600,9 @@ app.post("/api/admin/coupons", checkAdminAuth, (req: Request, res: Response) => 
   };
 
   couponsStore.push(newCoupon);
+  saveLocalCache();
+  persistCoupon(newCoupon).catch(() => {});
+
   res.json({ success: true, coupon: newCoupon });
 });
 
@@ -1500,12 +1614,18 @@ app.patch("/api/admin/coupons/:id", checkAdminAuth, (req: Request, res: Response
   }
 
   Object.assign(coupon, req.body);
+  saveLocalCache();
+  persistCoupon(coupon).catch(() => {});
+
   res.json({ success: true, coupon });
 });
 
 app.delete("/api/admin/coupons/:id", checkAdminAuth, (req: Request, res: Response) => {
   const { id } = req.params;
   couponsStore = couponsStore.filter((c) => c.id !== id);
+  saveLocalCache();
+  removeCoupon(id).catch(() => {});
+
   res.json({ success: true, message: "Coupon removed" });
 });
 
@@ -1572,7 +1692,7 @@ app.post("/api/admin/cms/:businessId/files/upload", checkAdminAuth, (req: Reques
         (f) => f.is_directory && f.path.toLowerCase() === accumulated.toLowerCase()
       );
       if (!exists) {
-        currentFiles.push({
+        const newDirRecord: TenantFile = {
           id: `dir-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           name: part,
           path: accumulated,
@@ -1581,7 +1701,9 @@ app.post("/api/admin/cms/:businessId/files/upload", checkAdminAuth, (req: Reques
           size: 0,
           updated_at: new Date().toISOString(),
           content_type: "directory",
-        });
+        };
+        currentFiles.push(newDirRecord);
+        persistFile(newDirRecord, businessId).catch(() => {});
       }
     }
   };
@@ -1629,13 +1751,15 @@ app.post("/api/admin/cms/:businessId/files/upload", checkAdminAuth, (req: Reques
       currentFiles.push(fileRecord);
     }
     processed.push(fileRecord);
+    persistFile(fileRecord, businessId).catch(() => {});
   }
 
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
 
   res.json({
     success: true,
-    message: `Successfully uploaded and synced ${processed.length} item(s)`,
+    message: `Successfully uploaded and permanently saved ${processed.length} item(s)`,
     files: currentFiles,
   });
 });
@@ -1675,20 +1799,23 @@ app.post("/api/admin/cms/:businessId/create-folder", checkAdminAuth, (req: Reque
 
   currentFiles.push(newFolder);
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
+  persistFile(newFolder, businessId).catch(() => {});
 
   res.json({ success: true, folder: newFolder, files: currentFiles });
 });
 
-// Create a new file (e.g. index.html, style.css, script.js)
-app.post("/api/admin/cms/:businessId/create-file", checkAdminAuth, (req: Request, res: Response) => {
+// Create a new file (supports both /create-file and /files endpoint)
+app.post(["/api/admin/cms/:businessId/create-file", "/api/admin/cms/:businessId/files"], checkAdminAuth, (req: Request, res: Response) => {
   const { businessId } = req.params;
-  const { file_name, parent_path, content, content_type } = req.body;
+  const { file_name, name, parent_path, content, content_type } = req.body;
 
-  if (!file_name || !String(file_name).trim()) {
+  const chosenName = String(file_name || name || "").trim();
+  if (!chosenName) {
     return res.status(400).json({ error: "File name is required" });
   }
 
-  const cleanName = String(file_name).trim();
+  const cleanName = chosenName;
   const cleanParent = parent_path ? String(parent_path).trim().replace(/^\/+|\/+$/g, "") : "";
   const fullPath = cleanParent ? `${cleanParent}/${cleanName}` : cleanName;
 
@@ -1725,6 +1852,8 @@ app.post("/api/admin/cms/:businessId/create-file", checkAdminAuth, (req: Request
 
   currentFiles.push(newFile);
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
+  persistFile(newFile, businessId).catch(() => {});
 
   res.json({ success: true, file: newFile, files: currentFiles });
 });
@@ -1768,6 +1897,9 @@ app.post("/api/admin/cms/:businessId/rename", checkAdminAuth, (req: Request, res
   }
 
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
+  persistFile(target, businessId).catch(() => {});
+
   res.json({ success: true, message: `Renamed to ${cleanNewName}`, file: target, files: currentFiles });
 });
 
@@ -1788,7 +1920,10 @@ app.put("/api/admin/cms/:businessId/files/:fileId", checkAdminAuth, (req: Reques
   file.updated_at = new Date().toISOString();
 
   filesStore.set(businessId, files);
-  res.json({ success: true, file });
+  saveLocalCache();
+  persistFile(file, businessId).catch(() => {});
+
+  res.json({ success: true, file, files });
 });
 
 // Delete file or directory (recursively removes child items)
@@ -1811,6 +1946,9 @@ app.delete("/api/admin/cms/:businessId/files/:fileId", checkAdminAuth, (req: Req
   }
 
   filesStore.set(businessId, filtered);
+  saveLocalCache();
+  removeFile(fileId, businessId).catch(() => {});
+
   res.json({ success: true, message: `Deleted '${target.name}' from storage`, files: filtered });
 });
 
@@ -1818,6 +1956,13 @@ app.delete("/api/admin/cms/:businessId/files/:fileId", checkAdminAuth, (req: Req
 app.delete("/api/admin/cms/:businessId/clear-all", checkAdminAuth, (req: Request, res: Response) => {
   const { businessId } = req.params;
   filesStore.set(businessId, []);
+  saveLocalCache();
+
+  const supabase = getSupabase();
+  if (supabase) {
+    Promise.resolve(supabase.from("tenant_files").delete().eq("business_id", businessId)).catch(() => {});
+  }
+
   res.json({ success: true, message: "All website files cleared from storage", files: [] });
 });
 
@@ -1836,6 +1981,9 @@ app.delete("/api/admin/businesses/:id/terminal", checkAdminAuth, (req: Request, 
 
   transactionsStore = transactionsStore.filter((t) => t.business_id !== id);
   businessesStore.splice(businessIndex, 1);
+
+  saveLocalCache();
+  removeBusiness(id).catch(() => {});
 
   console.log(
     `[Nuclear Delete] Terminally wiped business ${business.name} (${id}) and flushed ${filesCount} assets from storage.`
@@ -1951,10 +2099,8 @@ app.get("/api/tenant/render/:subdomain", (req: Request, res: Response) => {
     `);
   }
 
-  const now = new Date();
-  const isExpired = now.getTime() > new Date(business.plan_end_date).getTime() || business.status === "Inactive";
-  if (isExpired) {
-    return res.send(renderSuspendedHtml(business));
+  if (isBusinessExpired(business)) {
+    return res.status(402).send(renderSuspendedHtml(business));
   }
 
   const files = getBusinessFiles(business.id);
@@ -2031,9 +2177,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   }
 
   // 1. Suspension check
-  const now = new Date();
-  const isExpired = now.getTime() > new Date(business.plan_end_date).getTime() || business.status === "Inactive";
-  if (isExpired) {
+  if (isBusinessExpired(business)) {
     return res.status(402).send(renderSuspendedHtml(business));
   }
 

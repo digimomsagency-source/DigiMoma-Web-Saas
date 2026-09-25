@@ -415,15 +415,19 @@ export const HostingFileManager: React.FC<HostingFileManagerProps> = ({
       <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-sm">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-5 border-b border-neutral-800">
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <HardDrive className="w-5 h-5 text-blue-400" />
               <h3 className="text-lg font-bold text-white">Online Hosting File Manager</h3>
               <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-950 text-blue-300 border border-blue-800">
                 cPanel Style
               </span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-800 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                Permanent Storage Active
+              </span>
             </div>
             <p className="text-xs text-neutral-400 mt-1">
-              Upload your website folders, HTML, CSS, JavaScript, and assets from scratch. Live website is served directly on your custom path link.
+              Upload your website folders, HTML, CSS, JavaScript, and assets from scratch. Live website is served directly on your custom path link. All files are permanently saved on disk and database.
             </p>
           </div>
 

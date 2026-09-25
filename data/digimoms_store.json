@@ -1,0 +1,160 @@
+{
+  "businesses": [
+    {
+      "id": "a1111111-1111-1111-1111-111111111111",
+      "name": "Apex Digital Studio",
+      "mobile": "9876543210",
+      "subdomain": "apexstudio",
+      "custom_domain": "apexstudio.in",
+      "plan_start_date": "2026-08-16T11:37:26.628Z",
+      "plan_end_date": "2026-10-15T11:37:26.629Z",
+      "service_date": "2026-10-15T11:37:26.629Z",
+      "status": "Active",
+      "created_at": "2026-08-16T11:37:26.629Z",
+      "updated_at": "2026-09-15T11:37:26.629Z"
+    },
+    {
+      "id": "b2222222-2222-2222-2222-222222222222",
+      "name": "Glamour Salon & Spa",
+      "mobile": "9123456789",
+      "subdomain": "glamoursalon",
+      "plan_start_date": "2026-06-27T11:37:26.629Z",
+      "plan_end_date": "2025-01-01T00:00:00.000Z",
+      "service_date": "2025-01-01T00:00:00.000Z",
+      "status": "Inactive",
+      "created_at": "2026-06-27T11:37:26.629Z",
+      "updated_at": "2026-09-25T11:45:07.572Z"
+    },
+    {
+      "id": "c3333333-3333-3333-3333-333333333333",
+      "name": "Royal Sweets & Bakers",
+      "mobile": "9475388085",
+      "subdomain": "royalsweets",
+      "custom_domain": "royalsweets.com",
+      "plan_start_date": "2026-09-10T11:37:26.629Z",
+      "plan_end_date": "2024-01-01T00:00:00.000Z",
+      "service_date": "2024-01-01T00:00:00.000Z",
+      "status": "Inactive",
+      "created_at": "2026-09-10T11:37:26.629Z",
+      "updated_at": "2026-09-25T11:53:33.167Z",
+      "custom_pricing": {
+        "use_custom": true,
+        "monthly_price": 199,
+        "monthly_strike": 399,
+        "six_month_price": 799,
+        "six_month_strike": 1299,
+        "one_year_price": 1499,
+        "one_year_strike": 2499
+      }
+    }
+  ],
+  "settings": {
+    "payu_merchant_key": "gtKFFx",
+    "payu_salt": "eCwWELxi",
+    "payu_env": "test",
+    "whatsapp_number": "+919475388085",
+    "whatsapp_message": "I want to renewal domain",
+    "monthly_price": 99,
+    "monthly_strike": 999,
+    "six_month_price": 499,
+    "six_month_strike": 594,
+    "one_year_price": 949,
+    "one_year_strike": 1188,
+    "supabase_url": "https://ybusnuarevpyyecuzxgv.supabase.co",
+    "supabase_key": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidXNudWFyZXZweXllY3V6eGd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4ODU5OTcsImV4cCI6MjEwNTQ2MTk5N30.489xw5Q2QdvhSbhbHDsSWPycg9ztQDVKUHIR7mAYi7A",
+    "supabase_service_role_key": "",
+    "admin_password": "Swastika4945@",
+    "simulated_db_size_mb": 48.5
+  },
+  "coupons": [
+    {
+      "id": "cpn-1",
+      "code": "RENEW50",
+      "discount_type": "fixed",
+      "discount_value": 50,
+      "min_amount": 99,
+      "is_active": true,
+      "expiry_date": "2027-09-25T11:37:26.629Z",
+      "created_at": "2026-09-25T11:37:26.629Z"
+    },
+    {
+      "id": "cpn-2",
+      "code": "DIGI20",
+      "discount_type": "percentage",
+      "discount_value": 20,
+      "min_amount": 99,
+      "is_active": true,
+      "expiry_date": "2027-09-25T11:37:26.629Z",
+      "created_at": "2026-09-25T11:37:26.629Z"
+    },
+    {
+      "id": "cpn-3",
+      "code": "SPECIAL100",
+      "discount_type": "fixed",
+      "discount_value": 100,
+      "min_amount": 499,
+      "is_active": true,
+      "expiry_date": "2027-03-24T11:37:26.629Z",
+      "created_at": "2026-09-25T11:37:26.629Z"
+    }
+  ],
+  "transactions": [
+    {
+      "id": "tx-init-001",
+      "business_id": "c3333333-3333-3333-3333-333333333333",
+      "business_name": "Royal Sweets & Bakers",
+      "mobile": "9475388085",
+      "plan_tier": "six_month",
+      "amount": 499,
+      "original_amount": 499,
+      "discount_amount": 0,
+      "status": "Success",
+      "payu_txnid": "TXN_DIGI_INIT_78912",
+      "payu_payment_id": "PAYU_10928374",
+      "created_at": "2026-09-10T11:37:26.629Z",
+      "completed_at": "2026-09-10T11:38:11.629Z"
+    },
+    {
+      "id": "tx-init-002",
+      "business_id": "a1111111-1111-1111-1111-111111111111",
+      "business_name": "Apex Digital Studio",
+      "mobile": "9876543210",
+      "plan_tier": "monthly",
+      "amount": 49,
+      "original_amount": 99,
+      "discount_amount": 50,
+      "coupon_code": "RENEW50",
+      "status": "Success",
+      "payu_txnid": "TXN_DIGI_INIT_44521",
+      "payu_payment_id": "PAYU_88921471",
+      "created_at": "2026-08-16T11:37:26.629Z",
+      "completed_at": "2026-08-16T11:37:58.629Z"
+    }
+  ],
+  "files": {
+    "c3333333-3333-3333-3333-333333333333": [
+      {
+        "id": "f-1790337213134",
+        "name": "index.html",
+        "path": "index.html",
+        "parent_path": "",
+        "is_directory": false,
+        "size": 74,
+        "updated_at": "2026-09-25T11:53:33.134Z",
+        "content_type": "text/html",
+        "content": "<!DOCTYPE html><html><body><h1>Welcome to Royal Sweets!</h1></body></html>"
+      },
+      {
+        "id": "dir-1790337213160",
+        "name": "assets",
+        "path": "assets",
+        "parent_path": "",
+        "is_directory": true,
+        "size": 0,
+        "updated_at": "2026-09-25T11:53:33.160Z",
+        "content_type": "directory"
+      }
+    ]
+  },
+  "saved_at": "2026-09-25T11:53:33.167Z"
+}

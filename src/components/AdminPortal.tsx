@@ -34,11 +34,29 @@ import {
 } from "lucide-react";
 
 export const AdminPortal: React.FC = () => {
-  // Authentication state - Strict High Security: Session resets on page refresh!
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [passwordInput, setPasswordInput] = useState<string>("");
+  // Authentication state - Persisted safely in localStorage across browser refreshes
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      return Boolean(localStorage.getItem("digimoms_admin_token"));
+    }
+    return false;
+  });
+  const [passwordInput, setPasswordInput] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("digimoms_admin_token") || "";
+    }
+    return "";
+  });
   const [showLoginPassword, setShowLoginPassword] = useState<boolean>(false);
   const [authError, setAuthError] = useState<string | null>(null);
+
+  const handleLogout = () => {
+    try {
+      localStorage.removeItem("digimoms_admin_token");
+    } catch {}
+    setIsAuthenticated(false);
+    setPasswordInput("");
+  };
 
   // Admin Change Password Modal State
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState<boolean>(false);
@@ -213,6 +231,9 @@ export const AdminPortal: React.FC = () => {
         const data = await res.json();
         if (data.success) {
           setIsAuthenticated(true);
+          try {
+            localStorage.setItem("digimoms_admin_token", passwordInput);
+          } catch {}
           setAuthError(null);
         } else {
           setAuthError(data.error || "Invalid administrator credentials");
@@ -281,9 +302,15 @@ export const AdminPortal: React.FC = () => {
     setEditPlanSubdomain(biz.subdomain);
     setEditPlanCustomDomain(biz.custom_domain || "");
     setEditPlanStartDate(biz.plan_start_date ? biz.plan_start_date.split("T")[0] : "");
-    setEditPlanEndDate(biz.plan_end_date ? biz.plan_end_date.split("T")[0] : "");
-    setEditPlanServiceDate(biz.service_date ? biz.service_date.split("T")[0] : (biz.plan_end_date ? biz.plan_end_date.split("T")[0] : ""));
-    setEditPlanStatus(biz.status);
+    const endStr = biz.plan_end_date ? biz.plan_end_date.split("T")[0] : "";
+    setEditPlanEndDate(endStr);
+    setEditPlanServiceDate(biz.service_date ? biz.service_date.split("T")[0] : endStr);
+    const endMs = new Date(biz.plan_end_date).getTime();
+    if (biz.status === "Inactive" || (!isNaN(endMs) && endMs <= Date.now())) {
+      setEditPlanStatus("Inactive");
+    } else {
+      setEditPlanStatus("Active");
+    }
     setEditPlanMessage(null);
     setEditPlanError(null);
 
@@ -307,6 +334,29 @@ export const AdminPortal: React.FC = () => {
     }
 
     setIsEditPlanModalOpen(true);
+  };
+
+  // Immediate expiration toggle button
+  const handleSetExpired = () => {
+    const yesterday = new Date(Date.now() - 86400000).toISOString().split("T")[0];
+    setEditPlanEndDate(yesterday);
+    setEditPlanServiceDate(yesterday);
+    setEditPlanStatus("Inactive");
+    setEditPlanMessage(`Expiry set to yesterday (${yesterday}). Saving will turn OFF public website immediately.`);
+  };
+
+  // When expiry date is changed in picker
+  const handleEndDateChange = (newDateStr: string) => {
+    setEditPlanEndDate(newDateStr);
+    setEditPlanServiceDate(newDateStr);
+    const endMs = new Date(newDateStr).getTime();
+    if (!isNaN(endMs) && endMs <= Date.now()) {
+      setEditPlanStatus("Inactive");
+      setEditPlanMessage(`Date is today or past: Status set to Inactive (Website will turn OFF).`);
+    } else {
+      setEditPlanStatus("Active");
+      setEditPlanMessage(null);
+    }
   };
 
   // Quick extend plan by N days
@@ -833,8 +883,9 @@ export const AdminPortal: React.FC = () => {
                   {filteredBusinesses.map((biz) => {
                     const now = new Date();
                     const endDate = new Date(biz.plan_end_date);
-                    const isExpired = now.getTime() > endDate.getTime();
+                    const isExpired = now.getTime() >= endDate.getTime() || biz.status === "Inactive";
                     const diffDays = Math.ceil((endDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                    const isOnline = !isExpired && biz.status === "Active";
 
                     return (
                       <tr key={biz.id} className="hover:bg-neutral-800/40 transition">
@@ -860,8 +911,8 @@ export const AdminPortal: React.FC = () => {
                               Path-based &bull; No DNS setup
                             </span>
                             {biz.custom_pricing?.use_custom && (
-                              <span className="text-[10px] text-amber-300 bg-amber-950/70 border border-amber-800/80 px-1.5 py-0.5 rounded font-mono flex items-center gap-0.5">
-                                <DollarSign className="w-2.5 h-2.5" /> Custom Rates
+                              <span className="text-[10px] text-amber-300 bg-amber-950/70 border border-amber-800/80 px-1.5 py-0.5 rounded font-mono flex items-center gap-0.5 font-bold">
+                                <DollarSign className="w-2.5 h-2.5" /> Custom Plan: &#8377;{biz.custom_pricing.monthly_price}/mo
                               </span>
                             )}
                           </div>
@@ -878,23 +929,23 @@ export const AdminPortal: React.FC = () => {
                               isExpired ? "text-red-400 font-semibold" : "text-emerald-400"
                             }`}
                           >
-                            {isExpired ? "Expired / Suspended" : `${diffDays} days remaining`}
+                            {isExpired ? "Expired / Web OFF" : `${diffDays} days remaining`}
                           </div>
                         </td>
                         <td className="px-4 py-4">
                           <span
                             className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold uppercase tracking-wider ${
-                              biz.status === "Active"
+                              isOnline
                                 ? "bg-emerald-950 text-emerald-300 border border-emerald-800"
                                 : "bg-red-950 text-red-300 border border-red-800"
                             }`}
                           >
                             <span
                               className={`w-1.5 h-1.5 rounded-full ${
-                                biz.status === "Active" ? "bg-emerald-400" : "bg-red-400"
+                                isOnline ? "bg-emerald-400" : "bg-red-400 animate-pulse"
                               }`}
                             />
-                            {biz.status}
+                            {isOnline ? "Active (Online)" : "Suspended (OFF)"}
                           </span>
                         </td>
                         <td className="px-6 py-4 text-right space-x-2">
@@ -2038,34 +2089,42 @@ $$;
                 <label className="block text-neutral-300 font-semibold">
                   ⚡ Quick Plan Validity Extension (One-Click)
                 </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                   <button
                     type="button"
                     onClick={() => handleQuickExtendDays(30)}
-                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition"
+                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition text-xs"
                   >
                     +30 Days (1 Mo)
                   </button>
                   <button
                     type="button"
                     onClick={() => handleQuickExtendDays(90)}
-                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition"
+                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition text-xs"
                   >
                     +90 Days (3 Mo)
                   </button>
                   <button
                     type="button"
                     onClick={() => handleQuickExtendDays(180)}
-                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition"
+                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition text-xs"
                   >
                     +180 Days (6 Mo)
                   </button>
                   <button
                     type="button"
                     onClick={() => handleQuickExtendDays(365)}
-                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition"
+                    className="py-1.5 px-2 bg-neutral-900 hover:bg-blue-600 hover:text-white border border-neutral-700 rounded-lg text-neutral-200 text-center font-medium transition text-xs"
                   >
                     +365 Days (1 Yr)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSetExpired}
+                    className="py-1.5 px-2 bg-red-950/80 hover:bg-red-700 hover:text-white border border-red-700/60 rounded-lg text-red-200 text-center font-bold transition text-xs flex items-center justify-center gap-1"
+                    title="Expire subscription to turn OFF website immediately"
+                  >
+                    🔴 Expire (Web OFF)
                   </button>
                 </div>
               </div>
@@ -2087,10 +2146,7 @@ $$;
                   <input
                     type="date"
                     value={editPlanEndDate}
-                    onChange={(e) => {
-                      setEditPlanEndDate(e.target.value);
-                      setEditPlanServiceDate(e.target.value);
-                    }}
+                    onChange={(e) => handleEndDateChange(e.target.value)}
                     className="w-full px-2.5 py-2 bg-neutral-950 border border-neutral-700 rounded-xl text-white font-mono outline-none focus:border-blue-500"
                     required
                   />
@@ -2104,6 +2160,31 @@ $$;
                     className="w-full px-2.5 py-2 bg-neutral-950 border border-neutral-700 rounded-xl text-white font-mono outline-none focus:border-blue-500"
                   />
                 </div>
+              </div>
+
+              {/* Dynamic Status Preview Banner */}
+              <div className={`p-3 rounded-xl border text-xs font-semibold flex items-center gap-2.5 ${
+                editPlanStatus === "Inactive" || (editPlanEndDate && new Date(editPlanEndDate).getTime() <= Date.now())
+                  ? "bg-red-950/40 border-red-800 text-red-300"
+                  : "bg-emerald-950/40 border-emerald-800 text-emerald-300"
+              }`}>
+                {editPlanStatus === "Inactive" || (editPlanEndDate && new Date(editPlanEndDate).getTime() <= Date.now()) ? (
+                  <>
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                    <div>
+                      <strong className="block text-red-200">🔴 Website Service Suspended (Web OFF)</strong>
+                      <span className="text-[11px] text-red-400">Visitors to /{editPlanSubdomain} will see the Renewal Suspended screen.</span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+                    <div>
+                      <strong className="block text-emerald-200">🟢 Store Active &amp; Online (Web ON)</strong>
+                      <span className="text-[11px] text-emerald-400">Visitors can browse /{editPlanSubdomain} normally.</span>
+                    </div>
+                  </>
+                )}
               </div>
 
               {/* Custom Pricing Module for this specific business */}

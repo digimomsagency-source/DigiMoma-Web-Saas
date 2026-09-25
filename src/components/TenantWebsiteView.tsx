@@ -48,10 +48,25 @@ export function TenantWebsiteView({ subdomain }: TenantWebsiteViewProps) {
     };
   }, [subdomain]);
 
-  // Case 1: Tenant is explicitly expired or marked Inactive -> Show suspension screen immediately
-  const isExpired = business && (business.is_expired || business.status === "Inactive" || new Date(business.plan_end_date).getTime() < Date.now());
+  // Loading state
+  if (loading) {
+    return (
+      <div className="fixed inset-0 z-50 w-screen h-screen bg-neutral-950 text-white flex flex-col items-center justify-center p-6 text-center">
+        <div className="w-10 h-10 border-3 border-blue-600 border-t-transparent rounded-full animate-spin mb-4" />
+        <h3 className="text-sm font-semibold text-neutral-300">Verifying domain validity &amp; subscription...</h3>
+        <p className="text-xs text-neutral-500 font-mono mt-1">web.digimoms.in/{subdomain}</p>
+      </div>
+    );
+  }
 
-  if (!loading && isExpired && business) {
+  // Case 1: Tenant is explicitly expired or marked Inactive -> Show suspension screen immediately
+  const isExpired = business && (
+    business.is_expired ||
+    business.status === "Inactive" ||
+    (business.plan_end_date && new Date(business.plan_end_date).getTime() <= Date.now())
+  );
+
+  if (isExpired && business) {
     const expiryFormatted = new Date(business.plan_end_date).toLocaleDateString("en-IN", {
       day: "numeric",
       month: "long",
@@ -155,7 +170,7 @@ export function TenantWebsiteView({ subdomain }: TenantWebsiteViewProps) {
     <div className="fixed inset-0 z-50 w-screen h-screen bg-white overflow-hidden flex flex-col">
       {/* Full-screen Tenant Website Render Frame */}
       <iframe
-        src={`/api/tenant/render/${encodeURIComponent(subdomain)}`}
+        src={`/api/tenant/render/${encodeURIComponent(subdomain)}?t=${Date.now()}`}
         className="w-full h-full flex-1 border-0"
         title={`${subdomain} - Live Website`}
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
