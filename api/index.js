@@ -1,5 +1,7 @@
 // server.ts
 import express from "express";
+import path from "path";
+import fs from "fs";
 import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
 var app = express();
@@ -21,7 +23,9 @@ app.use((req, _res, next) => {
 app.use((req, res, next) => {
   if (req.query && req.query.route) {
     const rawRoute = Array.isArray(req.query.route) ? req.query.route.join("/") : String(req.query.route);
-    req.url = `/api/${rawRoute}`;
+    const decodedRoute = decodeURIComponent(rawRoute).replace(/^\/+/, "");
+    const [pathOnly, searchOnly] = decodedRoute.split("?");
+    req.url = `/api/${pathOnly}` + (searchOnly ? `?${searchOnly}` : "");
   }
   const original = req.headers["x-matched-path"] || req.headers["x-invoke-path"] || req.originalUrl || req.url || "";
   if (original && original !== "/api" && original !== "/api/" && (req.url === "/api" || req.url === "/api/" || req.url === "/")) {
@@ -59,7 +63,8 @@ var settingsStore = {
   one_year_price: 949,
   one_year_strike: 1188,
   supabase_url: process.env.SUPABASE_URL || "https://ybusnuarevpyyecuzxgv.supabase.co",
-  supabase_key: process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidXNudWFyZXZweXllY3V6eGd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4ODU5OTcsImV4cCI6MjEwNTQ2MTk5N30.489xw5Q2QdvhSbhbHDsSWPycg9ztQDVKUHIR7mAYi7A",
+  supabase_key: process.env.SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlidXNudWFyZXZweXllY3V6eGd2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4ODU5OTcsImV4cCI6MjEwNTQ2MTk5N30.489xw5Q2QdvhSbhbHDsSWPycg9ztQDVKUHIR7mAYi7A",
+  supabase_service_role_key: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
   admin_password: process.env.ADMIN_PASSWORD || "Swastika4945@",
   simulated_db_size_mb: 48.5
 };
@@ -178,14 +183,286 @@ var getBusinessFiles = (businessId) => {
   return filesStore.get(businessId);
 };
 function getSupabase() {
-  if (settingsStore.supabase_url && settingsStore.supabase_key) {
+  const url = process.env.SUPABASE_URL || settingsStore.supabase_url;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY || settingsStore.supabase_service_role_key || process.env.SUPABASE_ANON_KEY || settingsStore.supabase_key;
+  if (url && key) {
     try {
-      return createClient(settingsStore.supabase_url, settingsStore.supabase_key);
+      return createClient(url, key, {
+        auth: { persistSession: false }
+      });
     } catch {
       return null;
     }
   }
   return null;
+}
+var WORKSPACE_DATA_DIR = path.join(process.cwd(), "data");
+var PERSISTENT_STORE_PATH = path.join(WORKSPACE_DATA_DIR, "digimoms_store.json");
+var CACHE_FILE_PATH = path.join("/tmp", "digimoms_db_cache.json");
+function isBusinessExpired(business) {
+  if (!business) return true;
+  if (business.status === "Inactive") return true;
+  const endMs = new Date(business.plan_end_date).getTime();
+  if (isNaN(endMs) || Date.now() >= endMs) return true;
+  return false;
+}
+function refreshBusinessStatus(business) {
+  if (isBusinessExpired(business)) {
+    business.status = "Inactive";
+  }
+  return business;
+}
+function loadLocalCache() {
+  try {
+    let raw = "";
+    if (fs.existsSync(PERSISTENT_STORE_PATH)) {
+      raw = fs.readFileSync(PERSISTENT_STORE_PATH, "utf-8");
+    } else if (fs.existsSync(CACHE_FILE_PATH)) {
+      raw = fs.readFileSync(CACHE_FILE_PATH, "utf-8");
+    }
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.businesses) && data.businesses.length > 0) {
+        businessesStore = data.businesses.map((b) => refreshBusinessStatus({ ...b }));
+      }
+      if (data.settings && typeof data.settings === "object") {
+        settingsStore = { ...settingsStore, ...data.settings };
+      }
+      if (Array.isArray(data.coupons) && data.coupons.length > 0) {
+        couponsStore = data.coupons;
+      }
+      if (Array.isArray(data.transactions) && data.transactions.length > 0) {
+        transactionsStore = data.transactions;
+      }
+      if (data.files && typeof data.files === "object") {
+        for (const [bizId, files] of Object.entries(data.files)) {
+          if (Array.isArray(files)) {
+            filesStore.set(bizId, files);
+          }
+        }
+      }
+      return true;
+    }
+  } catch (err) {
+    console.warn("[Storage Load Warning]:", err);
+  }
+  return false;
+}
+function saveLocalCache() {
+  try {
+    const filesObj = {};
+    for (const [bizId, files] of filesStore.entries()) {
+      filesObj[bizId] = files;
+    }
+    const data = {
+      businesses: businessesStore,
+      settings: settingsStore,
+      coupons: couponsStore,
+      transactions: transactionsStore,
+      files: filesObj,
+      saved_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    const jsonStr = JSON.stringify(data, null, 2);
+    try {
+      if (!fs.existsSync(WORKSPACE_DATA_DIR)) {
+        fs.mkdirSync(WORKSPACE_DATA_DIR, { recursive: true });
+      }
+      fs.writeFileSync(PERSISTENT_STORE_PATH, jsonStr, "utf-8");
+    } catch (e) {
+      console.warn("[Workspace Disk Write Notice]:", e);
+    }
+    try {
+      fs.writeFileSync(CACHE_FILE_PATH, jsonStr, "utf-8");
+    } catch (e) {
+    }
+  } catch (err) {
+    console.error("[Storage Save Fatal Error]:", err);
+  }
+}
+loadLocalCache();
+async function persistBusiness(business) {
+  const idx = businessesStore.findIndex((b) => b.id === business.id);
+  if (idx >= 0) {
+    businessesStore[idx] = business;
+  } else {
+    businessesStore.unshift(business);
+  }
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+  try {
+    const payload = {
+      id: business.id,
+      name: business.name,
+      mobile: business.mobile,
+      subdomain: business.subdomain,
+      custom_domain: business.custom_domain || null,
+      plan_start_date: business.plan_start_date,
+      plan_end_date: business.plan_end_date,
+      service_date: business.service_date || business.plan_end_date,
+      status: business.status,
+      custom_pricing: business.custom_pricing || null,
+      created_at: business.created_at,
+      updated_at: business.updated_at
+    };
+    const { error } = await supabase.from("businesses").upsert(payload, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Write Error on businesses]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+async function removeBusiness(id) {
+  businessesStore = businessesStore.filter((b) => b.id !== id);
+  filesStore.delete(id);
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from("tenant_files").delete().eq("business_id", id);
+      await supabase.from("businesses").delete().eq("id", id);
+    } catch (err) {
+      console.error("[Supabase Delete Error]:", err);
+    }
+  }
+}
+async function persistFile(file, businessId) {
+  const current = getBusinessFiles(businessId);
+  const idx = current.findIndex((f) => f.id === file.id);
+  if (idx >= 0) {
+    current[idx] = file;
+  } else {
+    current.push(file);
+  }
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+  try {
+    const payload = {
+      id: file.id,
+      business_id: businessId,
+      name: file.name,
+      path: file.path,
+      size: file.size || 0,
+      updated_at: file.updated_at || (/* @__PURE__ */ new Date()).toISOString(),
+      content_type: file.content_type || "text/plain",
+      content: file.content || null,
+      is_directory: Boolean(file.is_directory),
+      parent_path: file.parent_path || ""
+    };
+    const { error } = await supabase.from("tenant_files").upsert(payload, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase CMS File Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+async function removeFile(fileId, businessId) {
+  const current = getBusinessFiles(businessId);
+  const updated = current.filter((f) => f.id !== fileId);
+  filesStore.set(businessId, updated);
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from("tenant_files").delete().eq("id", fileId);
+    } catch (err) {
+      console.error("[Supabase CMS File Delete Error]:", err);
+    }
+  }
+}
+async function persistSettings(settings) {
+  settingsStore = { ...settings };
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+  try {
+    const payload = {
+      id: "global_config",
+      payu_merchant_key: settings.payu_merchant_key,
+      payu_salt: settings.payu_salt,
+      payu_env: settings.payu_env,
+      whatsapp_number: settings.whatsapp_number,
+      whatsapp_message: settings.whatsapp_message,
+      monthly_price: settings.monthly_price,
+      monthly_strike: settings.monthly_strike,
+      six_month_price: settings.six_month_price,
+      six_month_strike: settings.six_month_strike,
+      one_year_price: settings.one_year_price,
+      one_year_strike: settings.one_year_strike,
+      admin_password: settings.admin_password,
+      simulated_db_size_mb: settings.simulated_db_size_mb,
+      updated_at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    const { error } = await supabase.from("settings").upsert(payload, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Settings Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+async function persistCoupon(coupon) {
+  const idx = couponsStore.findIndex((c) => c.id === coupon.id);
+  if (idx >= 0) {
+    couponsStore[idx] = coupon;
+  } else {
+    couponsStore.push(coupon);
+  }
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+  try {
+    const { error } = await supabase.from("coupons").upsert(coupon, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Coupon Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+async function removeCoupon(couponId) {
+  couponsStore = couponsStore.filter((c) => c.id !== couponId);
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (supabase) {
+    try {
+      await supabase.from("coupons").delete().eq("id", couponId);
+    } catch (err) {
+      console.error("[Supabase Coupon Delete Error]:", err);
+    }
+  }
+}
+async function persistTransaction(tx) {
+  const idx = transactionsStore.findIndex((t) => t.id === tx.id);
+  if (idx >= 0) {
+    transactionsStore[idx] = tx;
+  } else {
+    transactionsStore.unshift(tx);
+  }
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (!supabase) return { success: true };
+  try {
+    const { error } = await supabase.from("transactions").upsert(tx, { onConflict: "id" });
+    if (error) {
+      console.error("[Supabase Transaction Write Error]:", error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
 }
 app.get("/api/db-size", async (_req, res) => {
   const supabase = getSupabase();
@@ -235,35 +512,98 @@ app.get("/api/db-size", async (_req, res) => {
     status_message: "Database and cloud storage operating normally."
   });
 });
+app.get("/api/admin/supabase-status", checkAdminAuth, async (_req, res) => {
+  const supabase = getSupabase();
+  if (!supabase) {
+    return res.json({
+      connected: false,
+      message: "No Supabase URL or key configured."
+    });
+  }
+  let tableBusinessesOk = false;
+  let tableFilesOk = false;
+  let rlsRestricted = false;
+  let writeTestOk = false;
+  let errorMessage = "";
+  try {
+    const { error: bErr } = await supabase.from("businesses").select("id").limit(1);
+    if (!bErr) tableBusinessesOk = true;
+    else errorMessage = bErr.message;
+    const { error: fErr } = await supabase.from("tenant_files").select("id").limit(1);
+    if (!fErr) tableFilesOk = true;
+    const testId = "00000000-0000-0000-0000-000000000000";
+    const { error: wErr } = await supabase.from("businesses").upsert({
+      id: testId,
+      name: "Probe",
+      mobile: "0000000000",
+      subdomain: "__probe__",
+      plan_end_date: (/* @__PURE__ */ new Date()).toISOString(),
+      status: "Inactive"
+    }, { onConflict: "id" });
+    if (wErr) {
+      if (wErr.code === "42501") {
+        rlsRestricted = true;
+        errorMessage = "Supabase RLS is currently blocking write operations (Error 42501). Run the SQL script from 'SQL & Host Routing Guide' or add SUPABASE_SERVICE_ROLE_KEY to enable permanent cloud persistence.";
+      } else {
+        errorMessage = wErr.message;
+      }
+    } else {
+      writeTestOk = true;
+      await supabase.from("businesses").delete().eq("id", testId);
+    }
+  } catch (err) {
+    errorMessage = err.message || "Failed to query Supabase";
+  }
+  res.json({
+    connected: tableBusinessesOk,
+    tables_exist: {
+      businesses: tableBusinessesOk,
+      tenant_files: tableFilesOk
+    },
+    writable: writeTestOk,
+    rls_restricted: rlsRestricted,
+    message: writeTestOk ? "Supabase connected and fully writable! Changes will persist permanently across all sessions." : errorMessage
+  });
+});
 app.post("/api/admin/set-db-size", (req, res) => {
   const { size_mb } = req.body;
   if (typeof size_mb === "number") {
     settingsStore.simulated_db_size_mb = size_mb;
+    saveLocalCache();
     return res.json({ success: true, simulated_db_size_mb: size_mb });
   }
   return res.status(400).json({ error: "Invalid size_mb" });
 });
 app.get("/api/business/lookup", (req, res) => {
   const mobile = String(req.query.mobile || "").trim();
-  if (!mobile) {
-    return res.status(400).json({ error: "Mobile number is required" });
+  const subdomain = String(req.query.subdomain || "").trim();
+  if (!mobile && !subdomain) {
+    return res.status(400).json({ error: "Mobile number or subdomain is required" });
   }
-  const cleanMobile = mobile.replace(/[^0-9]/g, "").slice(-10);
-  const business = businessesStore.find((b) => b.mobile.replace(/[^0-9]/g, "").slice(-10) === cleanMobile);
+  let business;
+  if (mobile) {
+    const cleanMobile = mobile.replace(/[^0-9]/g, "").slice(-10);
+    business = businessesStore.find((b) => b.mobile.replace(/[^0-9]/g, "").slice(-10) === cleanMobile);
+  } else if (subdomain) {
+    business = businessesStore.find((b) => b.subdomain.toLowerCase() === subdomain.toLowerCase());
+  }
   if (!business) {
     return res.status(404).json({
-      error: "No registered business found with this mobile number. Please check the number or contact DigiMoms Support."
+      error: "No registered business found. Please check details or contact DigiMoms Support."
+    });
+  }
+  const isExpired = isBusinessExpired(business);
+  if (isExpired && business.status === "Active") {
+    business.status = "Inactive";
+    business.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+    saveLocalCache();
+    persistBusiness(business).catch(() => {
     });
   }
   const now = /* @__PURE__ */ new Date();
   const endDate = new Date(business.plan_end_date);
-  const isExpired = now.getTime() > endDate.getTime();
-  if (isExpired && business.status === "Active") {
-    business.status = "Inactive";
-    business.updated_at = now.toISOString();
-  }
   const diffTime = endDate.getTime() - now.getTime();
-  const daysRemaining = Math.ceil(diffTime / (1e3 * 60 * 60 * 24));
+  const daysRemaining = isExpired ? 0 : Math.max(0, Math.ceil(diffTime / (1e3 * 60 * 60 * 24)));
   const effectivePricing = business.custom_pricing && business.custom_pricing.use_custom ? {
     monthly_price: business.custom_pricing.monthly_price ?? settingsStore.monthly_price,
     monthly_strike: business.custom_pricing.monthly_strike ?? settingsStore.monthly_strike,
@@ -347,10 +687,6 @@ function generatePayUHash(params) {
   const hashString = `${params.key}|${params.txnid}|${params.amount}|${params.productinfo}|${params.firstname}|${params.email}|${params.udf1 || ""}|${params.udf2 || ""}|${params.udf3 || ""}|${params.udf4 || ""}|${params.udf5 || ""}||||||${params.salt}`;
   return crypto.createHash("sha512").update(hashString).digest("hex");
 }
-function verifyPayUReverseHash(params) {
-  const hashString = `${params.salt}|${params.status}||||||${params.udf5 || ""}|${params.udf4 || ""}|${params.udf3 || ""}|${params.udf2 || ""}|${params.udf1 || ""}|${params.email}|${params.firstname}|${params.productinfo}|${params.amount}|${params.txnid}|${params.key}`;
-  return crypto.createHash("sha512").update(hashString).digest("hex");
-}
 app.post("/api/payu/initiate", (req, res) => {
   const { business_id, plan_tier, coupon_code } = req.body;
   const business = businessesStore.find((b) => b.id === business_id);
@@ -420,6 +756,13 @@ app.post("/api/payu/initiate", (req, res) => {
     udf2: plan_tier,
     salt: settingsStore.payu_salt
   });
+  const host = req.get("host") || "";
+  const forwardedProto = req.get("x-forwarded-proto") || req.protocol || "https";
+  let callbackBase = "https://web.digimoms.in";
+  if (host && !host.includes("localhost") && !host.includes("127.0.0.1")) {
+    callbackBase = `${forwardedProto}://${host}`;
+  }
+  const callbackUrl = `${callbackBase}/api/payu/response`;
   const payuUrl = settingsStore.payu_env === "prod" ? "https://secure.payu.in/_payment" : "https://test.payu.in/_payment";
   res.json({
     success: true,
@@ -435,8 +778,8 @@ app.post("/api/payu/initiate", (req, res) => {
       firstname: firstName,
       email,
       phone: mobile,
-      surl: "https://web.digimoms.in/api/payu/response",
-      furl: "https://web.digimoms.in/api/payu/response",
+      surl: callbackUrl,
+      furl: callbackUrl,
       udf1: business.id,
       udf2: plan_tier,
       hash,
@@ -445,61 +788,71 @@ app.post("/api/payu/initiate", (req, res) => {
     action_url: payuUrl
   });
 });
-app.post("/api/payu-webhook", (req, res) => {
-  const {
-    status,
-    txnid,
-    amount,
-    productinfo,
-    firstname,
-    email,
-    udf1,
-    // business_id
-    udf2,
-    // plan_tier
-    udf3,
-    udf4,
-    udf5,
-    key,
-    hash,
-    mihpayid
-  } = req.body;
-  console.log(`[PayU Webhook] Received webhook callback for txnid: ${txnid}, status: ${status}`);
-  const salt = settingsStore.payu_salt;
-  const merchantKey = settingsStore.payu_merchant_key;
-  const expectedHash = verifyPayUReverseHash({
-    salt,
-    status: status || "",
-    udf5: udf5 || "",
-    udf4: udf4 || "",
-    udf3: udf3 || "",
-    udf2: udf2 || "",
-    udf1: udf1 || "",
-    email: email || "",
-    firstname: firstname || "",
-    productinfo: productinfo || "",
-    amount: amount || "",
-    txnid: txnid || "",
-    key: key || merchantKey
-  });
-  const isHashValid = hash && hash.toLowerCase() === expectedHash.toLowerCase();
-  const transaction = transactionsStore.find((t) => t.payu_txnid === txnid);
-  const businessId = udf1 || transaction?.business_id;
-  const planTier = udf2 || transaction?.plan_tier || "monthly";
-  if (!transaction) {
-    console.warn(`[PayU Webhook] Transaction ${txnid} not found in database.`);
+async function processPayUCallback(rawBody, rawQuery) {
+  let params = {};
+  if (typeof rawBody === "object" && rawBody !== null) {
+    params = { ...rawBody };
+  } else if (typeof rawBody === "string" && rawBody.trim()) {
+    try {
+      params = JSON.parse(rawBody);
+    } catch {
+      const parsed = new URLSearchParams(rawBody);
+      parsed.forEach((val, key) => {
+        params[key] = val;
+      });
+    }
   }
-  const business = businessesStore.find((b) => b.id === businessId);
-  if (status === "success") {
+  if (typeof rawQuery === "object" && rawQuery !== null) {
+    for (const [k, v] of Object.entries(rawQuery)) {
+      if (!params[k]) params[k] = v;
+    }
+  }
+  const status = String(params.status || "").toLowerCase().trim();
+  const txnid = String(params.txnid || "").trim();
+  const mihpayid = String(params.mihpayid || params.payuMoneyId || params.bank_ref_num || "").trim();
+  const unmappedstatus = String(params.unmappedstatus || "").toLowerCase().trim();
+  const udf1 = String(params.udf1 || "").trim();
+  const udf2 = String(params.udf2 || "").trim();
+  const errorMessage = params.error_Message || params.errorMessage || params.field9 || "";
+  console.log(`[PayU Processing] txnid=${txnid}, status=${status}, unmappedstatus=${unmappedstatus}, mihpayid=${mihpayid}`);
+  let transaction = transactionsStore.find((t) => t.payu_txnid === txnid || t.id === txnid);
+  const businessId = udf1 || transaction?.business_id;
+  let business = businessesStore.find((b) => b.id === businessId);
+  if (!business && transaction?.business_name) {
+    business = businessesStore.find((b) => b.name.toLowerCase() === transaction?.business_name.toLowerCase());
+  }
+  if (!business && transaction?.mobile) {
+    business = businessesStore.find((b) => b.mobile === transaction?.mobile);
+  }
+  const planTier = udf2 || transaction?.plan_tier || "monthly";
+  const isPaid = (status === "success" || unmappedstatus === "captured") && unmappedstatus !== "failed" && unmappedstatus !== "usercancelled";
+  if (isPaid) {
     if (transaction) {
       transaction.status = "Success";
       transaction.payu_payment_id = mihpayid || `PAYU_${Date.now()}`;
       transaction.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+    } else {
+      transaction = {
+        id: `tx-${Date.now()}`,
+        business_id: business?.id || businessId || "unknown",
+        business_name: business?.name || "Merchant Renewal",
+        mobile: business?.mobile || String(params.phone || ""),
+        plan_tier: planTier,
+        amount: Number(params.amount) || 0,
+        original_amount: Number(params.amount) || 0,
+        discount_amount: 0,
+        status: "Success",
+        payu_txnid: txnid || `TXN_${Date.now()}`,
+        payu_payment_id: mihpayid || `PAYU_${Date.now()}`,
+        created_at: (/* @__PURE__ */ new Date()).toISOString(),
+        completed_at: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      transactionsStore.unshift(transaction);
     }
     if (business) {
       const now = /* @__PURE__ */ new Date();
       let currentEndDate = new Date(business.plan_end_date);
-      if (now.getTime() > currentEndDate.getTime()) {
+      if (isNaN(currentEndDate.getTime()) || now.getTime() > currentEndDate.getTime()) {
         currentEndDate = now;
       }
       if (planTier === "monthly") {
@@ -513,27 +866,268 @@ app.post("/api/payu-webhook", (req, res) => {
       business.service_date = currentEndDate.toISOString();
       business.status = "Active";
       business.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-      console.log(
-        `[PayU Webhook] Successfully activated business ${business.name}. New validity: ${business.plan_end_date}`
-      );
+      await persistBusiness(business);
+      console.log(`[PayU Confirmed] Business '${business.name}' plan extended to ${business.plan_end_date}. Status: Active`);
     }
-    return res.status(200).json({
-      status: "success",
-      message: "Webhook processed, transaction marked Success, business validity extended to Active.",
-      hash_valid: isHashValid,
-      txnid
-    });
+    await persistTransaction(transaction);
+    saveLocalCache();
+    const redirectUrl = `/portal?payment=success&txnid=${encodeURIComponent(txnid)}&mobile=${encodeURIComponent(business?.mobile || transaction?.mobile || "")}`;
+    return {
+      success: true,
+      is_paid: true,
+      message: `Payment confirmed successfully! Business '${business?.name || "Store"}' plan extended to ${business ? new Date(business.plan_end_date).toLocaleDateString() : "Active"}.`,
+      txnid,
+      business,
+      transaction,
+      redirectUrl
+    };
   } else {
     if (transaction) {
       transaction.status = "Failed";
       transaction.completed_at = (/* @__PURE__ */ new Date()).toISOString();
+      await persistTransaction(transaction);
+      saveLocalCache();
     }
-    return res.status(200).json({
-      status: "failed",
-      message: "Transaction status flagged as Failed.",
-      txnid
-    });
+    console.warn(`[PayU Incomplete] Payment NOT successful for txnid=${txnid}. Status=${status}. No service extended.`);
+    const redirectUrl = `/portal?payment=failed&error=${encodeURIComponent(errorMessage || "Payment was not completed or was cancelled.")}&mobile=${encodeURIComponent(business?.mobile || transaction?.mobile || "")}`;
+    return {
+      success: false,
+      is_paid: false,
+      message: errorMessage || "Payment was not completed or was cancelled by user.",
+      txnid,
+      business,
+      transaction,
+      redirectUrl
+    };
   }
+}
+var handlePayUResponse = async (req, res) => {
+  const result = await processPayUCallback(req.body, req.query);
+  const acceptsJson = req.headers.accept?.includes("application/json") || req.query.format === "json";
+  if (acceptsJson) {
+    return res.status(result.is_paid ? 200 : 400).json(result);
+  }
+  if (result.is_paid) {
+    return res.type("html").send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Successful - DigiMoms Cloud</title>
+        <style>
+          * { margin:0; padding:0; box-sizing:border-box; }
+          body {
+            background-color: #0a0a0a;
+            color: #f5f5f5;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1rem;
+          }
+          .card {
+            background-color: #171717;
+            border: 1px solid #262626;
+            border-radius: 1.25rem;
+            padding: 2.5rem 2rem;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+          }
+          .icon {
+            width: 64px;
+            height: 64px;
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.25rem;
+            color: #10b981;
+          }
+          h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; color: #fff; }
+          p.desc { font-size: 0.875rem; color: #a3a3a3; margin-bottom: 1.5rem; line-height: 1.4; }
+          .details {
+            background: #0d0d0d;
+            border: 1px solid #262626;
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.5rem;
+            text-align: left;
+            font-size: 0.8125rem;
+          }
+          .row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #1c1c1c; }
+          .row:last-child { border-bottom: none; }
+          .label { color: #737373; }
+          .val { font-weight: 600; color: #e5e5e5; font-family: monospace; }
+          .btn {
+            display: block;
+            width: 100%;
+            background: #2563eb;
+            color: white;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.875rem;
+            padding: 0.85rem 1rem;
+            border-radius: 0.6rem;
+            transition: background 0.15s;
+          }
+          .btn:hover { background: #1d4ed8; }
+          .progress {
+            font-size: 0.75rem;
+            color: #737373;
+            margin-top: 1rem;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 6L9 17l-5-5"/>
+            </svg>
+          </div>
+          <h1>Payment Confirmed!</h1>
+          <p class="desc">Your payment was successfully received and verified by PayU. Your subscription plan has been activated.</p>
+          <div class="details">
+            <div class="row"><span class="label">Store:</span><span class="val">${result.business?.name || "Merchant"}</span></div>
+            <div class="row"><span class="label">Txn ID:</span><span class="val">${result.txnid}</span></div>
+            <div class="row"><span class="label">Amount:</span><span class="val">&#8377;${Number(result.transaction?.amount || 0).toFixed(2)}</span></div>
+            <div class="row"><span class="label">New Expiry:</span><span class="val" style="color:#10b981;">${result.business?.plan_end_date ? new Date(result.business.plan_end_date).toLocaleDateString() : "Active"}</span></div>
+            <div class="row"><span class="label">Status:</span><span class="val" style="color:#10b981; font-weight:bold;">Active</span></div>
+          </div>
+          <a href="${result.redirectUrl}" class="btn">Return to Renewal Portal</a>
+          <div class="progress">Redirecting automatically in 2 seconds...</div>
+        </div>
+        <script>
+          setTimeout(function() {
+            window.location.href = "${result.redirectUrl}";
+          }, 2000);
+        </script>
+      </body>
+      </html>
+    `);
+  } else {
+    return res.type("html").send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Incomplete - DigiMoms Cloud</title>
+        <style>
+          * { margin:0; padding:0; box-sizing:border-box; }
+          body {
+            background-color: #0a0a0a;
+            color: #f5f5f5;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1rem;
+          }
+          .card {
+            background-color: #171717;
+            border: 1px solid #262626;
+            border-radius: 1.25rem;
+            padding: 2.5rem 2rem;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+          }
+          .icon {
+            width: 64px;
+            height: 64px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.25rem;
+            color: #ef4444;
+          }
+          h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; color: #fff; }
+          p.desc { font-size: 0.875rem; color: #a3a3a3; margin-bottom: 1.5rem; line-height: 1.4; }
+          .details {
+            background: #0d0d0d;
+            border: 1px solid #262626;
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.5rem;
+            text-align: left;
+            font-size: 0.8125rem;
+          }
+          .row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #1c1c1c; }
+          .row:last-child { border-bottom: none; }
+          .label { color: #737373; }
+          .val { font-weight: 600; color: #e5e5e5; font-family: monospace; }
+          .btn {
+            display: block;
+            width: 100%;
+            background: #262626;
+            color: #f5f5f5;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.875rem;
+            padding: 0.85rem 1rem;
+            border-radius: 0.6rem;
+            transition: background 0.15s;
+          }
+          .btn:hover { background: #333333; }
+          .progress {
+            font-size: 0.75rem;
+            color: #737373;
+            margin-top: 1rem;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="15" y1="9" x2="9" y2="15"/>
+              <line x1="9" y1="9" x2="15" y2="15"/>
+            </svg>
+          </div>
+          <h1>Payment Not Completed</h1>
+          <p class="desc">${result.message || "Payment was not completed or was cancelled. No subscription validity was extended."}</p>
+          <div class="details">
+            <div class="row"><span class="label">Txn ID:</span><span class="val">${result.txnid || "N/A"}</span></div>
+            <div class="row"><span class="label">Subscription Status:</span><span class="val" style="color:#ef4444;">Not Renewed</span></div>
+          </div>
+          <a href="${result.redirectUrl}" class="btn">Return to Portal &amp; Try Again</a>
+          <div class="progress">Redirecting automatically in 3 seconds...</div>
+        </div>
+        <script>
+          setTimeout(function() {
+            window.location.href = "${result.redirectUrl}";
+          }, 3000);
+        </script>
+      </body>
+      </html>
+    `);
+  }
+};
+app.post(["/api/payu/response", "/payu/response"], handlePayUResponse);
+app.get(["/api/payu/response", "/payu/response"], handlePayUResponse);
+app.post("/api/payu-webhook", async (req, res) => {
+  console.log(`[PayU Webhook] Callback received`);
+  const result = await processPayUCallback(req.body, req.query);
+  return res.status(200).json({
+    status: result.is_paid ? "success" : "failed",
+    message: result.message,
+    txnid: result.txnid,
+    business: result.business?.name,
+    valid_until: result.business?.plan_end_date
+  });
 });
 app.get("/api/payu-webhook", (_req, res) => {
   res.json({
@@ -543,9 +1137,33 @@ app.get("/api/payu-webhook", (_req, res) => {
     methods_supported: ["POST"]
   });
 });
-app.post("/api/payu/simulate-webhook", (req, res) => {
+app.post("/api/payu/simulate-webhook", async (req, res) => {
   const { txnid } = req.body;
-  const transaction = transactionsStore.find((t) => t.payu_txnid === txnid);
+  const transaction = transactionsStore.find((t) => t.payu_txnid === txnid || t.id === txnid);
+  if (!transaction) {
+    return res.status(404).json({ error: "Transaction not found" });
+  }
+  const result = await processPayUCallback(
+    {
+      status: "success",
+      txnid: transaction.payu_txnid,
+      amount: transaction.amount,
+      udf1: transaction.business_id,
+      udf2: transaction.plan_tier,
+      mihpayid: `PAYU_SIM_${Date.now()}`
+    },
+    {}
+  );
+  res.json({
+    success: result.is_paid,
+    message: result.message,
+    transaction: result.transaction,
+    business: result.business
+  });
+});
+app.post("/api/admin/transactions/:id/confirm", checkAdminAuth, async (req, res) => {
+  const { id } = req.params;
+  const transaction = transactionsStore.find((t) => t.id === id || t.payu_txnid === id);
   if (!transaction) {
     return res.status(404).json({ error: "Transaction not found" });
   }
@@ -553,32 +1171,22 @@ app.post("/api/payu/simulate-webhook", (req, res) => {
   if (!business) {
     return res.status(404).json({ error: "Associated business not found" });
   }
-  transaction.status = "Success";
-  transaction.payu_payment_id = `PAYU_SIM_${Date.now()}`;
-  transaction.completed_at = (/* @__PURE__ */ new Date()).toISOString();
-  const now = /* @__PURE__ */ new Date();
-  let currentEndDate = new Date(business.plan_end_date);
-  if (now.getTime() > currentEndDate.getTime()) {
-    currentEndDate = now;
-  }
-  if (transaction.plan_tier === "monthly") {
-    currentEndDate.setMonth(currentEndDate.getMonth() + 1);
-  } else if (transaction.plan_tier === "six_month") {
-    currentEndDate.setMonth(currentEndDate.getMonth() + 6);
-  } else if (transaction.plan_tier === "one_year") {
-    currentEndDate.setFullYear(currentEndDate.getFullYear() + 1);
-  }
-  business.plan_end_date = currentEndDate.toISOString();
-  business.service_date = currentEndDate.toISOString();
-  business.status = "Active";
-  business.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-  res.json({
+  const result = await processPayUCallback(
+    {
+      status: "success",
+      txnid: transaction.payu_txnid,
+      amount: transaction.amount,
+      udf1: business.id,
+      udf2: transaction.plan_tier,
+      mihpayid: transaction.payu_payment_id || `PAYU_ADMIN_CONFIRM_${Date.now()}`
+    },
+    {}
+  );
+  return res.json({
     success: true,
-    message: `Payment simulation successful! Business '${business.name}' plan extended to ${new Date(
-      business.plan_end_date
-    ).toLocaleDateString()} and status is now Active.`,
-    transaction,
-    business
+    message: `Transaction ${transaction.payu_txnid} confirmed and business '${business.name}' plan extended to ${new Date(business.plan_end_date).toLocaleDateString()}.`,
+    transaction: result.transaction,
+    business: result.business
   });
 });
 function checkAdminAuth(req, res, next) {
@@ -617,12 +1225,15 @@ app.post("/api/admin/change-password", checkAdminAuth, (req, res) => {
   });
 });
 app.get("/api/admin/businesses", checkAdminAuth, (_req, res) => {
-  const now = /* @__PURE__ */ new Date();
+  let changed = false;
   businessesStore.forEach((b) => {
-    if (now.getTime() > new Date(b.plan_end_date).getTime() && b.status === "Active") {
-      b.status = "Inactive";
-    }
+    const prevStatus = b.status;
+    refreshBusinessStatus(b);
+    if (b.status !== prevStatus) changed = true;
   });
+  if (changed) {
+    saveLocalCache();
+  }
   res.json({
     businesses: businessesStore
   });
@@ -642,7 +1253,7 @@ app.post("/api/admin/businesses", checkAdminAuth, (req, res) => {
   endDate.setMonth(endDate.getMonth() + months);
   const newBusiness = {
     id: `biz-${Date.now()}`,
-    name,
+    name: name.trim(),
     mobile: mobile.trim(),
     subdomain: cleanSubdomain,
     custom_domain: custom_domain ? custom_domain.trim() : void 0,
@@ -653,8 +1264,13 @@ app.post("/api/admin/businesses", checkAdminAuth, (req, res) => {
     created_at: (/* @__PURE__ */ new Date()).toISOString(),
     updated_at: (/* @__PURE__ */ new Date()).toISOString()
   };
+  refreshBusinessStatus(newBusiness);
   businessesStore.unshift(newBusiness);
   filesStore.set(newBusiness.id, []);
+  saveLocalCache();
+  persistBusiness(newBusiness).catch((err) => {
+    console.warn("[Supabase Write Notice]:", err);
+  });
   res.json({ success: true, business: newBusiness });
 });
 app.patch("/api/admin/businesses/:id/override", checkAdminAuth, (req, res) => {
@@ -669,14 +1285,22 @@ app.patch("/api/admin/businesses/:id/override", checkAdminAuth, (req, res) => {
   }
   if (service_date) {
     business.service_date = new Date(service_date).toISOString();
-  }
-  if (status && (status === "Active" || status === "Inactive")) {
-    business.status = status;
   } else if (plan_end_date) {
-    const now = /* @__PURE__ */ new Date();
-    business.status = new Date(business.plan_end_date).getTime() >= now.getTime() ? "Active" : "Inactive";
+    business.service_date = business.plan_end_date;
+  }
+  const endMs = new Date(business.plan_end_date).getTime();
+  if (isNaN(endMs) || endMs <= Date.now()) {
+    business.status = "Inactive";
+  } else if (status === "Inactive") {
+    business.status = "Inactive";
+  } else {
+    business.status = "Active";
   }
   business.updated_at = (/* @__PURE__ */ new Date()).toISOString();
+  saveLocalCache();
+  persistBusiness(business).catch((err) => {
+    console.warn("[Supabase Write Notice]:", err);
+  });
   res.json({
     success: true,
     message: `Chronological override applied for ${business.name}`,
@@ -695,7 +1319,6 @@ app.put("/api/admin/businesses/:id/plan", checkAdminAuth, (req, res) => {
     service_date,
     status,
     extension_days,
-    plan_tier_name,
     custom_pricing
   } = req.body;
   const business = businessesStore.find((b) => b.id === id);
@@ -730,7 +1353,6 @@ app.put("/api/admin/businesses/:id/plan", checkAdminAuth, (req, res) => {
     baseDate.setDate(baseDate.getDate() + Number(extension_days));
     business.plan_end_date = baseDate.toISOString();
     business.service_date = baseDate.toISOString();
-    business.status = "Active";
   } else if (plan_end_date) {
     business.plan_end_date = new Date(plan_end_date).toISOString();
     if (service_date) {
@@ -754,14 +1376,20 @@ app.put("/api/admin/businesses/:id/plan", checkAdminAuth, (req, res) => {
       };
     }
   }
-  if (status && (status === "Active" || status === "Inactive")) {
-    business.status = status;
-  } else if (business.plan_end_date) {
-    const now = /* @__PURE__ */ new Date();
-    business.status = new Date(business.plan_end_date).getTime() >= now.getTime() ? "Active" : "Inactive";
+  const endMs = new Date(business.plan_end_date).getTime();
+  if (isNaN(endMs) || endMs <= Date.now()) {
+    business.status = "Inactive";
+  } else if (status === "Inactive") {
+    business.status = "Inactive";
+  } else {
+    business.status = "Active";
   }
   business.updated_at = (/* @__PURE__ */ new Date()).toISOString();
-  console.log(`[Admin Manual Plan Edit] Updated business '${business.name}' plan: ${business.status}, ends ${business.plan_end_date}`);
+  saveLocalCache();
+  persistBusiness(business).catch((err) => {
+    console.warn("[Supabase Write Notice on Plan Update]:", err);
+  });
+  console.log(`[Admin Manual Plan Edit] Saved business '${business.name}': status=${business.status}, ends=${business.plan_end_date}`);
   return res.json({
     success: true,
     message: `Business plan successfully updated for ${business.name}`,
@@ -789,6 +1417,9 @@ app.post("/api/admin/settings", checkAdminAuth, (req, res) => {
     one_year_price: Number(incoming.one_year_price ?? settingsStore.one_year_price),
     one_year_strike: Number(incoming.one_year_strike ?? settingsStore.one_year_strike)
   };
+  saveLocalCache();
+  persistSettings(settingsStore).catch(() => {
+  });
   res.json({
     success: true,
     message: "System global settings updated successfully",
@@ -815,6 +1446,9 @@ app.post("/api/admin/coupons", checkAdminAuth, (req, res) => {
     created_at: (/* @__PURE__ */ new Date()).toISOString()
   };
   couponsStore.push(newCoupon);
+  saveLocalCache();
+  persistCoupon(newCoupon).catch(() => {
+  });
   res.json({ success: true, coupon: newCoupon });
 });
 app.patch("/api/admin/coupons/:id", checkAdminAuth, (req, res) => {
@@ -824,11 +1458,17 @@ app.patch("/api/admin/coupons/:id", checkAdminAuth, (req, res) => {
     return res.status(404).json({ error: "Coupon not found" });
   }
   Object.assign(coupon, req.body);
+  saveLocalCache();
+  persistCoupon(coupon).catch(() => {
+  });
   res.json({ success: true, coupon });
 });
 app.delete("/api/admin/coupons/:id", checkAdminAuth, (req, res) => {
   const { id } = req.params;
   couponsStore = couponsStore.filter((c) => c.id !== id);
+  saveLocalCache();
+  removeCoupon(id).catch(() => {
+  });
   res.json({ success: true, message: "Coupon removed" });
 });
 app.get("/api/admin/cms/:businessId/files", checkAdminAuth, (req, res) => {
@@ -877,7 +1517,7 @@ app.post("/api/admin/cms/:businessId/files/upload", checkAdminAuth, (req, res) =
         (f) => f.is_directory && f.path.toLowerCase() === accumulated.toLowerCase()
       );
       if (!exists) {
-        currentFiles.push({
+        const newDirRecord = {
           id: `dir-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
           name: part,
           path: accumulated,
@@ -886,6 +1526,9 @@ app.post("/api/admin/cms/:businessId/files/upload", checkAdminAuth, (req, res) =
           size: 0,
           updated_at: (/* @__PURE__ */ new Date()).toISOString(),
           content_type: "directory"
+        };
+        currentFiles.push(newDirRecord);
+        persistFile(newDirRecord, businessId).catch(() => {
         });
       }
     }
@@ -924,11 +1567,14 @@ app.post("/api/admin/cms/:businessId/files/upload", checkAdminAuth, (req, res) =
       currentFiles.push(fileRecord);
     }
     processed.push(fileRecord);
+    persistFile(fileRecord, businessId).catch(() => {
+    });
   }
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
   res.json({
     success: true,
-    message: `Successfully uploaded and synced ${processed.length} item(s)`,
+    message: `Successfully uploaded and permanently saved ${processed.length} item(s)`,
     files: currentFiles
   });
 });
@@ -960,15 +1606,19 @@ app.post("/api/admin/cms/:businessId/create-folder", checkAdminAuth, (req, res) 
   };
   currentFiles.push(newFolder);
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
+  persistFile(newFolder, businessId).catch(() => {
+  });
   res.json({ success: true, folder: newFolder, files: currentFiles });
 });
-app.post("/api/admin/cms/:businessId/create-file", checkAdminAuth, (req, res) => {
+app.post(["/api/admin/cms/:businessId/create-file", "/api/admin/cms/:businessId/files"], checkAdminAuth, (req, res) => {
   const { businessId } = req.params;
-  const { file_name, parent_path, content, content_type } = req.body;
-  if (!file_name || !String(file_name).trim()) {
+  const { file_name, name, parent_path, content, content_type } = req.body;
+  const chosenName = String(file_name || name || "").trim();
+  if (!chosenName) {
     return res.status(400).json({ error: "File name is required" });
   }
-  const cleanName = String(file_name).trim();
+  const cleanName = chosenName;
   const cleanParent = parent_path ? String(parent_path).trim().replace(/^\/+|\/+$/g, "") : "";
   const fullPath = cleanParent ? `${cleanParent}/${cleanName}` : cleanName;
   const currentFiles = getBusinessFiles(businessId);
@@ -1000,6 +1650,9 @@ app.post("/api/admin/cms/:businessId/create-file", checkAdminAuth, (req, res) =>
   };
   currentFiles.push(newFile);
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
+  persistFile(newFile, businessId).catch(() => {
+  });
   res.json({ success: true, file: newFile, files: currentFiles });
 });
 app.post("/api/admin/cms/:businessId/rename", checkAdminAuth, (req, res) => {
@@ -1033,6 +1686,9 @@ app.post("/api/admin/cms/:businessId/rename", checkAdminAuth, (req, res) => {
     }
   }
   filesStore.set(businessId, currentFiles);
+  saveLocalCache();
+  persistFile(target, businessId).catch(() => {
+  });
   res.json({ success: true, message: `Renamed to ${cleanNewName}`, file: target, files: currentFiles });
 });
 app.put("/api/admin/cms/:businessId/files/:fileId", checkAdminAuth, (req, res) => {
@@ -1047,7 +1703,10 @@ app.put("/api/admin/cms/:businessId/files/:fileId", checkAdminAuth, (req, res) =
   file.size = Buffer.byteLength(file.content, "utf8");
   file.updated_at = (/* @__PURE__ */ new Date()).toISOString();
   filesStore.set(businessId, files);
-  res.json({ success: true, file });
+  saveLocalCache();
+  persistFile(file, businessId).catch(() => {
+  });
+  res.json({ success: true, file, files });
 });
 app.delete("/api/admin/cms/:businessId/files/:fileId", checkAdminAuth, (req, res) => {
   const { businessId, fileId } = req.params;
@@ -1064,11 +1723,20 @@ app.delete("/api/admin/cms/:businessId/files/:fileId", checkAdminAuth, (req, res
     filtered = files.filter((f) => f.id !== fileId);
   }
   filesStore.set(businessId, filtered);
+  saveLocalCache();
+  removeFile(fileId, businessId).catch(() => {
+  });
   res.json({ success: true, message: `Deleted '${target.name}' from storage`, files: filtered });
 });
 app.delete("/api/admin/cms/:businessId/clear-all", checkAdminAuth, (req, res) => {
   const { businessId } = req.params;
   filesStore.set(businessId, []);
+  saveLocalCache();
+  const supabase = getSupabase();
+  if (supabase) {
+    Promise.resolve(supabase.from("tenant_files").delete().eq("business_id", businessId)).catch(() => {
+    });
+  }
   res.json({ success: true, message: "All website files cleared from storage", files: [] });
 });
 app.delete("/api/admin/businesses/:id/terminal", checkAdminAuth, (req, res) => {
@@ -1082,6 +1750,9 @@ app.delete("/api/admin/businesses/:id/terminal", checkAdminAuth, (req, res) => {
   filesStore.delete(id);
   transactionsStore = transactionsStore.filter((t) => t.business_id !== id);
   businessesStore.splice(businessIndex, 1);
+  saveLocalCache();
+  removeBusiness(id).catch(() => {
+  });
   console.log(
     `[Nuclear Delete] Terminally wiped business ${business.name} (${id}) and flushed ${filesCount} assets from storage.`
   );
@@ -1181,10 +1852,8 @@ app.get("/api/tenant/render/:subdomain", (req, res) => {
       </body></html>
     `);
   }
-  const now = /* @__PURE__ */ new Date();
-  const isExpired = now.getTime() > new Date(business.plan_end_date).getTime() || business.status === "Inactive";
-  if (isExpired) {
-    return res.send(renderSuspendedHtml(business));
+  if (isBusinessExpired(business)) {
+    return res.status(402).send(renderSuspendedHtml(business));
   }
   const files = getBusinessFiles(business.id);
   const indexHtml = files.find(
@@ -1237,9 +1906,7 @@ app.use((req, res, next) => {
   if (!business) {
     return next();
   }
-  const now = /* @__PURE__ */ new Date();
-  const isExpired = now.getTime() > new Date(business.plan_end_date).getTime() || business.status === "Inactive";
-  if (isExpired) {
+  if (isBusinessExpired(business)) {
     return res.status(402).send(renderSuspendedHtml(business));
   }
   const files = getBusinessFiles(business.id);

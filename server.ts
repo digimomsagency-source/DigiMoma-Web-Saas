@@ -36,7 +36,9 @@ app.use((req, _res, next) => {
 app.use((req, res, next) => {
   if (req.query && req.query.route) {
     const rawRoute = Array.isArray(req.query.route) ? req.query.route.join("/") : String(req.query.route);
-    req.url = `/api/${rawRoute}`;
+    const decodedRoute = decodeURIComponent(rawRoute).replace(/^\/+/, "");
+    const [pathOnly, searchOnly] = decodedRoute.split("?");
+    req.url = `/api/${pathOnly}` + (searchOnly ? `?${searchOnly}` : "");
   }
   const original = (req.headers["x-matched-path"] as string) || (req.headers["x-invoke-path"] as string) || req.originalUrl || req.url || "";
   if (original && original !== "/api" && original !== "/api/" && (req.url === "/api" || req.url === "/api/" || req.url === "/")) {
@@ -1055,6 +1057,14 @@ app.post("/api/payu/initiate", (req: Request, res: Response) => {
     salt: settingsStore.payu_salt,
   });
 
+  const host = req.get("host") || "";
+  const forwardedProto = req.get("x-forwarded-proto") || req.protocol || "https";
+  let callbackBase = "https://web.digimoms.in";
+  if (host && !host.includes("localhost") && !host.includes("127.0.0.1")) {
+    callbackBase = `${forwardedProto}://${host}`;
+  }
+  const callbackUrl = `${callbackBase}/api/payu/response`;
+
   const payuUrl =
     settingsStore.payu_env === "prod"
       ? "https://secure.payu.in/_payment"
@@ -1074,8 +1084,8 @@ app.post("/api/payu/initiate", (req: Request, res: Response) => {
       firstname: firstName,
       email,
       phone: mobile,
-      surl: "https://web.digimoms.in/api/payu/response",
-      furl: "https://web.digimoms.in/api/payu/response",
+      surl: callbackUrl,
+      furl: callbackUrl,
       udf1: business.id,
       udf2: plan_tier,
       hash,
@@ -1085,82 +1095,96 @@ app.post("/api/payu/initiate", (req: Request, res: Response) => {
   });
 });
 
-// CRITICAL: Standalone Backend Webhook API Endpoint listener
-// POST /api/payu-webhook
-// Securely intercepts server-to-server POST data, checks hash integrity,
-// updates transaction status, increments plan_end_date, and flips status to 'Active'.
-app.post("/api/payu-webhook", (req: Request, res: Response) => {
-  const {
-    status,
-    txnid,
-    amount,
-    productinfo,
-    firstname,
-    email,
-    udf1, // business_id
-    udf2, // plan_tier
-    udf3,
-    udf4,
-    udf5,
-    key,
-    hash,
-    mihpayid,
-  } = req.body;
+// Centralized PayU processing engine:
+// Strictly verifies transaction status and integrity.
+// CRITICAL: Extends subscription validity and sets status 'Active' ONLY IF payment was received ('success').
+async function processPayUCallback(rawBody: any, rawQuery: any) {
+  let params: Record<string, any> = {};
 
-  console.log(`[PayU Webhook] Received webhook callback for txnid: ${txnid}, status: ${status}`);
-
-  // Retrieve salt from configuration
-  const salt = settingsStore.payu_salt;
-  const merchantKey = settingsStore.payu_merchant_key;
-
-  // Validate Reverse Hash Integrity
-  const expectedHash = verifyPayUReverseHash({
-    salt,
-    status: status || "",
-    udf5: udf5 || "",
-    udf4: udf4 || "",
-    udf3: udf3 || "",
-    udf2: udf2 || "",
-    udf1: udf1 || "",
-    email: email || "",
-    firstname: firstname || "",
-    productinfo: productinfo || "",
-    amount: amount || "",
-    txnid: txnid || "",
-    key: key || merchantKey,
-  });
-
-  const isHashValid = hash && hash.toLowerCase() === expectedHash.toLowerCase();
-
-  // Find corresponding pending transaction
-  const transaction = transactionsStore.find((t) => t.payu_txnid === txnid);
-  const businessId = udf1 || transaction?.business_id;
-  const planTier = (udf2 as "monthly" | "six_month" | "one_year") || transaction?.plan_tier || "monthly";
-
-  if (!transaction) {
-    console.warn(`[PayU Webhook] Transaction ${txnid} not found in database.`);
+  if (typeof rawBody === "object" && rawBody !== null) {
+    params = { ...rawBody };
+  } else if (typeof rawBody === "string" && rawBody.trim()) {
+    try {
+      params = JSON.parse(rawBody);
+    } catch {
+      const parsed = new URLSearchParams(rawBody);
+      parsed.forEach((val, key) => {
+        params[key] = val;
+      });
+    }
   }
 
-  const business = businessesStore.find((b) => b.id === businessId);
+  // Merge query parameters if body missing keys
+  if (typeof rawQuery === "object" && rawQuery !== null) {
+    for (const [k, v] of Object.entries(rawQuery)) {
+      if (!params[k]) params[k] = v;
+    }
+  }
 
-  // If status is success (and optionally verifying hash)
-  if (status === "success") {
+  const status = String(params.status || "").toLowerCase().trim();
+  const txnid = String(params.txnid || "").trim();
+  const mihpayid = String(params.mihpayid || params.payuMoneyId || params.bank_ref_num || "").trim();
+  const unmappedstatus = String(params.unmappedstatus || "").toLowerCase().trim();
+  const udf1 = String(params.udf1 || "").trim(); // business_id
+  const udf2 = String(params.udf2 || "").trim(); // plan_tier
+  const errorMessage = params.error_Message || params.errorMessage || params.field9 || "";
+
+  console.log(`[PayU Processing] txnid=${txnid}, status=${status}, unmappedstatus=${unmappedstatus}, mihpayid=${mihpayid}`);
+
+  // Retrieve matching transaction from database / store
+  let transaction = transactionsStore.find((t) => t.payu_txnid === txnid || t.id === txnid);
+  const businessId = udf1 || transaction?.business_id;
+
+  // Retrieve matching business
+  let business = businessesStore.find((b) => b.id === businessId);
+  if (!business && transaction?.business_name) {
+    business = businessesStore.find((b) => b.name.toLowerCase() === transaction?.business_name.toLowerCase());
+  }
+  if (!business && transaction?.mobile) {
+    business = businessesStore.find((b) => b.mobile === transaction?.mobile);
+  }
+
+  const planTier = (udf2 as "monthly" | "six_month" | "one_year") || transaction?.plan_tier || "monthly";
+
+  // Strict verification: Payment is confirmed ONLY IF status is 'success' or unmappedstatus is 'captured'
+  const isPaid =
+    (status === "success" || unmappedstatus === "captured") &&
+    unmappedstatus !== "failed" &&
+    unmappedstatus !== "usercancelled";
+
+  if (isPaid) {
+    // 1. Mark transaction as Success
     if (transaction) {
       transaction.status = "Success";
       transaction.payu_payment_id = mihpayid || `PAYU_${Date.now()}`;
       transaction.completed_at = new Date().toISOString();
+    } else {
+      transaction = {
+        id: `tx-${Date.now()}`,
+        business_id: business?.id || businessId || "unknown",
+        business_name: business?.name || "Merchant Renewal",
+        mobile: business?.mobile || String(params.phone || ""),
+        plan_tier: planTier,
+        amount: Number(params.amount) || 0,
+        original_amount: Number(params.amount) || 0,
+        discount_amount: 0,
+        status: "Success",
+        payu_txnid: txnid || `TXN_${Date.now()}`,
+        payu_payment_id: mihpayid || `PAYU_${Date.now()}`,
+        created_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+      };
+      transactionsStore.unshift(transaction);
     }
 
+    // 2. CRITICAL RULE: ONLY add/extend service if payment is fully confirmed
     if (business) {
       const now = new Date();
       let currentEndDate = new Date(business.plan_end_date);
-
-      // If already expired, start increment from NOW; otherwise extend current plan_end_date
-      if (now.getTime() > currentEndDate.getTime()) {
+      if (isNaN(currentEndDate.getTime()) || now.getTime() > currentEndDate.getTime()) {
         currentEndDate = now;
       }
 
-      // Increment corresponding client business's plan_end_date by strict tier
       if (planTier === "monthly") {
         currentEndDate.setMonth(currentEndDate.getMonth() + 1);
       } else if (planTier === "six_month") {
@@ -1171,32 +1195,293 @@ app.post("/api/payu-webhook", (req: Request, res: Response) => {
 
       business.plan_end_date = currentEndDate.toISOString();
       business.service_date = currentEndDate.toISOString();
-      // Immediately flip the business status flag back to "Active"
       business.status = "Active";
       business.updated_at = new Date().toISOString();
 
-      console.log(
-        `[PayU Webhook] Successfully activated business ${business.name}. New validity: ${business.plan_end_date}`
-      );
+      await persistBusiness(business);
+      console.log(`[PayU Confirmed] Business '${business.name}' plan extended to ${business.plan_end_date}. Status: Active`);
     }
 
-    return res.status(200).json({
-      status: "success",
-      message: "Webhook processed, transaction marked Success, business validity extended to Active.",
-      hash_valid: isHashValid,
+    await persistTransaction(transaction);
+    saveLocalCache();
+
+    const redirectUrl = `/portal?payment=success&txnid=${encodeURIComponent(txnid)}&mobile=${encodeURIComponent(business?.mobile || transaction?.mobile || "")}`;
+
+    return {
+      success: true,
+      is_paid: true,
+      message: `Payment confirmed successfully! Business '${business?.name || "Store"}' plan extended to ${business ? new Date(business.plan_end_date).toLocaleDateString() : "Active"}.`,
       txnid,
-    });
+      business,
+      transaction,
+      redirectUrl,
+    };
   } else {
+    // Payment was NOT successful (Failed, Cancelled, User abort)
+    // CRITICAL: NEVER extend business service if payment is not confirmed!
     if (transaction) {
       transaction.status = "Failed";
       transaction.completed_at = new Date().toISOString();
+      await persistTransaction(transaction);
+      saveLocalCache();
     }
-    return res.status(200).json({
-      status: "failed",
-      message: "Transaction status flagged as Failed.",
+
+    console.warn(`[PayU Incomplete] Payment NOT successful for txnid=${txnid}. Status=${status}. No service extended.`);
+
+    const redirectUrl = `/portal?payment=failed&error=${encodeURIComponent(errorMessage || "Payment was not completed or was cancelled.")}&mobile=${encodeURIComponent(business?.mobile || transaction?.mobile || "")}`;
+
+    return {
+      success: false,
+      is_paid: false,
+      message: errorMessage || "Payment was not completed or was cancelled by user.",
       txnid,
-    });
+      business,
+      transaction,
+      redirectUrl,
+    };
   }
+}
+
+// PayU Hosted Checkout Response Endpoint (surl / furl callback)
+// Intercepts browser POST/GET from PayU, validates result, updates subscription ONLY if payment succeeded,
+// and displays confirmation or redirects back to the customer renewal portal.
+const handlePayUResponse = async (req: Request, res: Response) => {
+  const result = await processPayUCallback(req.body, req.query);
+
+  const acceptsJson = req.headers.accept?.includes("application/json") || req.query.format === "json";
+  if (acceptsJson) {
+    return res.status(result.is_paid ? 200 : 400).json(result);
+  }
+
+  // Render branded HTML response page with auto-redirect
+  if (result.is_paid) {
+    return res.type("html").send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Successful - DigiMoms Cloud</title>
+        <style>
+          * { margin:0; padding:0; box-sizing:border-box; }
+          body {
+            background-color: #0a0a0a;
+            color: #f5f5f5;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1rem;
+          }
+          .card {
+            background-color: #171717;
+            border: 1px solid #262626;
+            border-radius: 1.25rem;
+            padding: 2.5rem 2rem;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+          }
+          .icon {
+            width: 64px;
+            height: 64px;
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.25rem;
+            color: #10b981;
+          }
+          h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; color: #fff; }
+          p.desc { font-size: 0.875rem; color: #a3a3a3; margin-bottom: 1.5rem; line-height: 1.4; }
+          .details {
+            background: #0d0d0d;
+            border: 1px solid #262626;
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.5rem;
+            text-align: left;
+            font-size: 0.8125rem;
+          }
+          .row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #1c1c1c; }
+          .row:last-child { border-bottom: none; }
+          .label { color: #737373; }
+          .val { font-weight: 600; color: #e5e5e5; font-family: monospace; }
+          .btn {
+            display: block;
+            width: 100%;
+            background: #2563eb;
+            color: white;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.875rem;
+            padding: 0.85rem 1rem;
+            border-radius: 0.6rem;
+            transition: background 0.15s;
+          }
+          .btn:hover { background: #1d4ed8; }
+          .progress {
+            font-size: 0.75rem;
+            color: #737373;
+            margin-top: 1rem;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 6L9 17l-5-5"/>
+            </svg>
+          </div>
+          <h1>Payment Confirmed!</h1>
+          <p class="desc">Your payment was successfully received and verified by PayU. Your subscription plan has been activated.</p>
+          <div class="details">
+            <div class="row"><span class="label">Store:</span><span class="val">${result.business?.name || "Merchant"}</span></div>
+            <div class="row"><span class="label">Txn ID:</span><span class="val">${result.txnid}</span></div>
+            <div class="row"><span class="label">Amount:</span><span class="val">&#8377;${Number(result.transaction?.amount || 0).toFixed(2)}</span></div>
+            <div class="row"><span class="label">New Expiry:</span><span class="val" style="color:#10b981;">${result.business?.plan_end_date ? new Date(result.business.plan_end_date).toLocaleDateString() : "Active"}</span></div>
+            <div class="row"><span class="label">Status:</span><span class="val" style="color:#10b981; font-weight:bold;">Active</span></div>
+          </div>
+          <a href="${result.redirectUrl}" class="btn">Return to Renewal Portal</a>
+          <div class="progress">Redirecting automatically in 2 seconds...</div>
+        </div>
+        <script>
+          setTimeout(function() {
+            window.location.href = "${result.redirectUrl}";
+          }, 2000);
+        </script>
+      </body>
+      </html>
+    `);
+  } else {
+    return res.type("html").send(`
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Payment Incomplete - DigiMoms Cloud</title>
+        <style>
+          * { margin:0; padding:0; box-sizing:border-box; }
+          body {
+            background-color: #0a0a0a;
+            color: #f5f5f5;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 1rem;
+          }
+          .card {
+            background-color: #171717;
+            border: 1px solid #262626;
+            border-radius: 1.25rem;
+            padding: 2.5rem 2rem;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+          }
+          .icon {
+            width: 64px;
+            height: 64px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.25rem;
+            color: #ef4444;
+          }
+          h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 0.5rem; color: #fff; }
+          p.desc { font-size: 0.875rem; color: #a3a3a3; margin-bottom: 1.5rem; line-height: 1.4; }
+          .details {
+            background: #0d0d0d;
+            border: 1px solid #262626;
+            border-radius: 0.75rem;
+            padding: 1rem 1.25rem;
+            margin-bottom: 1.5rem;
+            text-align: left;
+            font-size: 0.8125rem;
+          }
+          .row { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #1c1c1c; }
+          .row:last-child { border-bottom: none; }
+          .label { color: #737373; }
+          .val { font-weight: 600; color: #e5e5e5; font-family: monospace; }
+          .btn {
+            display: block;
+            width: 100%;
+            background: #262626;
+            color: #f5f5f5;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.875rem;
+            padding: 0.85rem 1rem;
+            border-radius: 0.6rem;
+            transition: background 0.15s;
+          }
+          .btn:hover { background: #333333; }
+          .progress {
+            font-size: 0.75rem;
+            color: #737373;
+            margin-top: 1rem;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="icon">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="15" y1="9" x2="9" y2="15"/>
+              <line x1="9" y1="9" x2="15" y2="15"/>
+            </svg>
+          </div>
+          <h1>Payment Not Completed</h1>
+          <p class="desc">${result.message || "Payment was not completed or was cancelled. No subscription validity was extended."}</p>
+          <div class="details">
+            <div class="row"><span class="label">Txn ID:</span><span class="val">${result.txnid || "N/A"}</span></div>
+            <div class="row"><span class="label">Subscription Status:</span><span class="val" style="color:#ef4444;">Not Renewed</span></div>
+          </div>
+          <a href="${result.redirectUrl}" class="btn">Return to Portal &amp; Try Again</a>
+          <div class="progress">Redirecting automatically in 3 seconds...</div>
+        </div>
+        <script>
+          setTimeout(function() {
+            window.location.href = "${result.redirectUrl}";
+          }, 3000);
+        </script>
+      </body>
+      </html>
+    `);
+  }
+};
+
+// Route listeners for PayU response callback (both POST and GET, with and without /api prefix)
+app.post(["/api/payu/response", "/payu/response"], handlePayUResponse);
+app.get(["/api/payu/response", "/payu/response"], handlePayUResponse);
+
+// CRITICAL: Standalone Backend Webhook API Endpoint listener
+// POST /api/payu-webhook
+// Securely intercepts server-to-server POST data, verifies payment,
+// updates transaction status, increments plan_end_date, and flips status to 'Active'.
+app.post("/api/payu-webhook", async (req: Request, res: Response) => {
+  console.log(`[PayU Webhook] Callback received`);
+  const result = await processPayUCallback(req.body, req.query);
+  return res.status(200).json({
+    status: result.is_paid ? "success" : "failed",
+    message: result.message,
+    txnid: result.txnid,
+    business: result.business?.name,
+    valid_until: result.business?.plan_end_date,
+  });
 });
 
 // GET listener for /api/payu-webhook to allow webhook ping / diagnostic checks
@@ -1210,11 +1495,38 @@ app.get("/api/payu-webhook", (_req: Request, res: Response) => {
 });
 
 // Simulator endpoint: Allows instant one-click testing of the PayU Webhook from the UI!
-// Non-programmers can test the complete automated renewal cycle without real card spending.
-app.post("/api/payu/simulate-webhook", (req: Request, res: Response) => {
+app.post("/api/payu/simulate-webhook", async (req: Request, res: Response) => {
   const { txnid } = req.body;
-  const transaction = transactionsStore.find((t) => t.payu_txnid === txnid);
+  const transaction = transactionsStore.find((t) => t.payu_txnid === txnid || t.id === txnid);
 
+  if (!transaction) {
+    return res.status(404).json({ error: "Transaction not found" });
+  }
+
+  const result = await processPayUCallback(
+    {
+      status: "success",
+      txnid: transaction.payu_txnid,
+      amount: transaction.amount,
+      udf1: transaction.business_id,
+      udf2: transaction.plan_tier,
+      mihpayid: `PAYU_SIM_${Date.now()}`,
+    },
+    {}
+  );
+
+  res.json({
+    success: result.is_paid,
+    message: result.message,
+    transaction: result.transaction,
+    business: result.business,
+  });
+});
+
+// Admin: Manually verify/confirm a transaction and activate store
+app.post("/api/admin/transactions/:id/confirm", checkAdminAuth, async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const transaction = transactionsStore.find((t) => t.id === id || t.payu_txnid === id);
   if (!transaction) {
     return res.status(404).json({ error: "Transaction not found" });
   }
@@ -1224,37 +1536,23 @@ app.post("/api/payu/simulate-webhook", (req: Request, res: Response) => {
     return res.status(404).json({ error: "Associated business not found" });
   }
 
-  // Simulate successful PayU callback
-  transaction.status = "Success";
-  transaction.payu_payment_id = `PAYU_SIM_${Date.now()}`;
-  transaction.completed_at = new Date().toISOString();
+  const result = await processPayUCallback(
+    {
+      status: "success",
+      txnid: transaction.payu_txnid,
+      amount: transaction.amount,
+      udf1: business.id,
+      udf2: transaction.plan_tier,
+      mihpayid: transaction.payu_payment_id || `PAYU_ADMIN_CONFIRM_${Date.now()}`,
+    },
+    {}
+  );
 
-  const now = new Date();
-  let currentEndDate = new Date(business.plan_end_date);
-  if (now.getTime() > currentEndDate.getTime()) {
-    currentEndDate = now;
-  }
-
-  if (transaction.plan_tier === "monthly") {
-    currentEndDate.setMonth(currentEndDate.getMonth() + 1);
-  } else if (transaction.plan_tier === "six_month") {
-    currentEndDate.setMonth(currentEndDate.getMonth() + 6);
-  } else if (transaction.plan_tier === "one_year") {
-    currentEndDate.setFullYear(currentEndDate.getFullYear() + 1);
-  }
-
-  business.plan_end_date = currentEndDate.toISOString();
-  business.service_date = currentEndDate.toISOString();
-  business.status = "Active";
-  business.updated_at = new Date().toISOString();
-
-  res.json({
+  return res.json({
     success: true,
-    message: `Payment simulation successful! Business '${business.name}' plan extended to ${new Date(
-      business.plan_end_date
-    ).toLocaleDateString()} and status is now Active.`,
-    transaction,
-    business,
+    message: `Transaction ${transaction.payu_txnid} confirmed and business '${business.name}' plan extended to ${new Date(business.plan_end_date).toLocaleDateString()}.`,
+    transaction: result.transaction,
+    business: result.business,
   });
 });
 

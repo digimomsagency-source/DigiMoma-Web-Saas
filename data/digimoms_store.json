@@ -19,11 +19,11 @@
       "mobile": "9123456789",
       "subdomain": "glamoursalon",
       "plan_start_date": "2026-06-27T11:37:26.629Z",
-      "plan_end_date": "2025-01-01T00:00:00.000Z",
-      "service_date": "2025-01-01T00:00:00.000Z",
-      "status": "Inactive",
+      "plan_end_date": "2026-11-25T12:20:33.151Z",
+      "service_date": "2026-11-25T12:20:33.151Z",
+      "status": "Active",
       "created_at": "2026-06-27T11:37:26.629Z",
-      "updated_at": "2026-09-25T11:45:07.572Z"
+      "updated_at": "2026-09-25T12:20:39.347Z"
     },
     {
       "id": "c3333333-3333-3333-3333-333333333333",
@@ -100,6 +100,50 @@
   ],
   "transactions": [
     {
+      "id": "tx-1790338839347",
+      "business_id": "b2222222-2222-2222-2222-222222222222",
+      "business_name": "Glamour Salon & Spa",
+      "mobile": "9123456789",
+      "plan_tier": "monthly",
+      "amount": 99,
+      "original_amount": 99,
+      "discount_amount": 0,
+      "status": "Success",
+      "payu_txnid": "TXN_DIGI_BROWSER_TEST",
+      "payu_payment_id": "PAYU_1790338839347",
+      "created_at": "2026-09-25T12:20:39.347Z",
+      "completed_at": "2026-09-25T12:20:39.347Z"
+    },
+    {
+      "id": "tx-1790338834085",
+      "business_id": "b2222222-2222-2222-2222-222222222222",
+      "business_name": "Glamour Salon & Spa",
+      "mobile": "9123456789",
+      "plan_tier": "one_year",
+      "amount": 949,
+      "original_amount": 949,
+      "discount_amount": 0,
+      "status": "Failed",
+      "payu_txnid": "TXN_DIGI_1790338834085_UBKAU",
+      "created_at": "2026-09-25T12:20:34.085Z",
+      "completed_at": "2026-09-25T12:20:34.090Z"
+    },
+    {
+      "id": "tx-1790338833145",
+      "business_id": "b2222222-2222-2222-2222-222222222222",
+      "business_name": "Glamour Salon & Spa",
+      "mobile": "9123456789",
+      "plan_tier": "monthly",
+      "amount": 99,
+      "original_amount": 99,
+      "discount_amount": 0,
+      "status": "Success",
+      "payu_txnid": "TXN_DIGI_1790338833145_RVTVR",
+      "created_at": "2026-09-25T12:20:33.145Z",
+      "payu_payment_id": "PAYU_TEST_40918239",
+      "completed_at": "2026-09-25T12:20:33.151Z"
+    },
+    {
       "id": "tx-init-001",
       "business_id": "c3333333-3333-3333-3333-333333333333",
       "business_name": "Royal Sweets & Bakers",
@@ -156,5 +200,5 @@
       }
     ]
   },
-  "saved_at": "2026-09-25T11:53:33.167Z"
+  "saved_at": "2026-09-25T12:20:39.757Z"
 }

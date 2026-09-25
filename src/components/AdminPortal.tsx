@@ -429,6 +429,29 @@ export const AdminPortal: React.FC = () => {
   };
 
   // Chronological Override Submission
+  const [confirmingTxId, setConfirmingTxId] = useState<string | null>(null);
+
+  const handleConfirmTransaction = async (txId: string) => {
+    try {
+      setConfirmingTxId(txId);
+      const res = await fetch(`/api/admin/transactions/${txId}/confirm`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert(data.message || "Payment verified and store subscription activated!");
+        await loadAdminData();
+      } else {
+        alert(data.error || "Failed to confirm transaction.");
+      }
+    } catch (err: any) {
+      alert("Error confirming transaction: " + err.message);
+    } finally {
+      setConfirmingTxId(null);
+    }
+  };
+
   const handleApplyOverride = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedBusinessForOverride) return;
@@ -1019,6 +1042,7 @@ export const AdminPortal: React.FC = () => {
                     <th className="px-4 py-3">Tier</th>
                     <th className="px-4 py-3">Amount &amp; Coupon</th>
                     <th className="px-4 py-3">Gateway Status</th>
+                    <th className="px-4 py-3 text-center">Action</th>
                     <th className="px-6 py-3 text-right">Timestamp</th>
                   </tr>
                 </thead>
@@ -1057,6 +1081,24 @@ export const AdminPortal: React.FC = () => {
                         >
                           {tx.status}
                         </span>
+                      </td>
+                      <td className="px-4 py-3.5 text-center">
+                        {tx.status === "Pending" ? (
+                          <button
+                            type="button"
+                            onClick={() => handleConfirmTransaction(tx.id)}
+                            disabled={confirmingTxId === tx.id}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-emerald-950 hover:bg-emerald-900 border border-emerald-700 text-emerald-300 text-[11px] font-medium transition cursor-pointer disabled:opacity-50"
+                            title="Manually verify payment and activate store plan"
+                          >
+                            <CheckCircle className="w-3 h-3 text-emerald-400" />
+                            {confirmingTxId === tx.id ? "Confirming..." : "Confirm & Activate"}
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-neutral-500 font-mono">
+                            {tx.status === "Success" ? "Verified" : "Closed"}
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-3.5 text-right font-mono text-neutral-400">
                         {new Date(tx.created_at).toLocaleString()}
